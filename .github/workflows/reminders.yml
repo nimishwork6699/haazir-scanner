@@ -1,12 +1,14 @@
 name: Hearing reminders
 
 on:
+  # Runs only in the public repo nimishwork6699/haazir-scanner, where Actions are free (see the job's if).
   schedule:
     - cron: "30 3 * * *"   # 09:00 IST
   workflow_dispatch:
 
 jobs:
   remind:
+    if: github.repository == 'nimishwork6699/haazir-scanner'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     defaults:

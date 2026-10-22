@@ -1,12 +1,14 @@
 name: Evening cause list
 
 on:
+  # Runs only in the public repo nimishwork6699/haazir-scanner, where Actions are free (see the job's if).
   schedule:
     - cron: "30 13 * * *"   # 19:00 IST: tomorrow's hearings to the legal head
   workflow_dispatch:
 
 jobs:
   causelist:
+    if: github.repository == 'nimishwork6699/haazir-scanner'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     defaults:

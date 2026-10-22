@@ -1,18 +1,26 @@
 name: Worker
+
+# Every 10 minutes, a safety net behind the dashboard's instant start: Find one case requests still waiting, and
+# searches still waiting or whose workers died get their cloud run started (lookup.yml, up to ten workers each).
+# Runs only in the public repo nimishwork6699/haazir-scanner, where Actions are free.
 on:
   schedule:
     - cron: "*/10 * * * *"
   workflow_dispatch:
+
 permissions:
   actions: write
   contents: read
+
 concurrency:
-  group: court-search
+  group: worker
   cancel-in-progress: false
+
 jobs:
-  work:
+  kick:
+    if: github.repository == 'nimishwork6699/haazir-scanner'
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: scanner
@@ -21,6 +29,7 @@ jobs:
       SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       APP_URL: ${{ vars.APP_URL }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -31,9 +40,6 @@ jobs:
       - run: pip install -r requirements.txt
       - name: Find one case
         run: python -m haazir.find run
-      - name: Searches
+      - name: Start waiting searches
         if: always()
-        run: python -m haazir.lookup run --max-minutes 330
-      - name: Watch requests
-        if: always()
-        run: python -m haazir.watch run
+        run: python -m haazir.lookup kick

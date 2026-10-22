@@ -19,7 +19,6 @@ from . import places
 from .classify import categorize
 from .consumer import EJagriti, case_values, save, series_of
 from .db import DB
-from .ecourts import ECourts
 from .lookup import area, tasks_of
 from .matching import normalise
 
@@ -64,18 +63,31 @@ async def run_one(db: DB, w: dict) -> dict:
     # again), or listed afresh for searches made before that list was kept. For an all-India search only the
     # courts where cases were found are added, or every scan would search thousands of courts.
     ej = EJagriti()
-    tasks = tasks_of(db, lookup["id"])
+    tasks = [t for t in tasks_of(db, lookup["id"]) if t["forum"] != "index"]
     if tasks:
         courts = {"district": [], "high_court": [], "consumer": []}
         seen = set()
+        complexes: dict[tuple, dict] = {}
         for t in tasks:
+            if t["forum"] == "district":
+                # A search keeps one court search per establishment: put each complex back together.
+                c = t["payload"]["court"]
+                key = (c["state_code"], c["dist_code"], c["complex_code"])
+                if key not in complexes:
+                    complexes[key] = {**t["payload"], "court": {**c, "est_codes": ""}}
+                    courts["district"].append(complexes[key])
+                ests = [e for e in complexes[key]["court"]["est_codes"].split(",") if e]
+                for e in (c.get("est_codes") or "").split(","):
+                    if e and e not in ests:
+                        ests.append(e)
+                complexes[key]["court"]["est_codes"] = ",".join(ests)
+                continue
             key = (t["forum"], repr(sorted(t["payload"].items())))
             if key not in seen:
                 seen.add(key)
                 courts[t["forum"]].append(t["payload"])
     else:
-        async with ECourts() as ec:
-            courts = await area(ec, ej, lookup)
+        courts = await area(db, lookup, list_missing=True)
     if lookup["state_code"] == "all":
         found = {(r["forum"], r["court"], r.get("district") or "") for rows_ in picked.values() for r in rows_}
         courts = {f: [c for c in cs if (f, c["name"], c.get("district") or "") in found] for f, cs in courts.items()}

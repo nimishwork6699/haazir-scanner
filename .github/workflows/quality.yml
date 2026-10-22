@@ -1,6 +1,7 @@
 name: Weekly quality check
 
 on:
+  # Runs only in the public repo nimishwork6699/haazir-scanner, where Actions are free (see the job's if).
   schedule:
     - cron: "30 0 * * 1"   # Mondays 06:00 IST
   workflow_dispatch:
@@ -11,6 +12,7 @@ concurrency:
 
 jobs:
   quality:
+    if: github.repository == 'nimishwork6699/haazir-scanner'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     defaults:

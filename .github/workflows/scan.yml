@@ -3,6 +3,7 @@ name: Scan eCourts
 on:
   # Fallback timer. GitHub often starts these hours late; the on-time start comes from Vercel Cron
   # calling /api/cron/scan, which dispatches this workflow.
+  # Runs only in the public repo nimishwork6699/haazir-scanner, where Actions are free (see the job's if).
   schedule:
     - cron: "30 1 * * *"   # 07:00 IST
     - cron: "30 11 * * *"  # 17:00 IST
@@ -32,8 +33,13 @@ concurrency:
   group: ecourts-scan
   cancel-in-progress: false
 
+permissions:
+  actions: write
+  contents: read
+
 jobs:
   scan:
+    if: github.repository == 'nimishwork6699/haazir-scanner'
     runs-on: ubuntu-latest
     timeout-minutes: 120
     defaults:
@@ -77,4 +83,6 @@ jobs:
         run: python -m haazir.find run
       - name: Court searches waiting
         if: always()
-        run: python -m haazir.lookup run --max-minutes 45
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python -m haazir.lookup kick
