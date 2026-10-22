@@ -1,7 +1,7 @@
 name: Search courts
 
 # One search from the dashboard (Search courts, Load more, Watch) or from the Worker: plan its court searches, then
-# start up to ten workers side by side. Each is a separate runner with its own address and takes the next court
+# start up to twenty workers side by side. Each is a separate runner with its own address and takes the next court
 # search from the shared list, so all of them stay busy whatever the search covers. A run that runs out of time
 # starts the next one itself (Carry on). Runs only in the public repo nimishwork6699/haazir-scanner, where Actions
 # are free.
@@ -82,7 +82,7 @@ jobs:
     timeout-minutes: 350
     strategy:
       fail-fast: false
-      max-parallel: 10
+      max-parallel: 20
       matrix:
         worker: ${{ fromJSON(needs.plan.outputs.workers) }}
     defaults:
