@@ -1,0 +1,28 @@
+name: Hearing reminders
+
+on:
+  schedule:
+    - cron: "30 3 * * *"   # 09:00 IST
+  workflow_dispatch:
+
+jobs:
+  remind:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: scanner
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      APP_URL: ${{ vars.APP_URL || 'https://haazir-pi.vercel.app' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: scanner/requirements.txt
+      - run: pip install -r requirements.txt
+      - run: python -m haazir.reminders

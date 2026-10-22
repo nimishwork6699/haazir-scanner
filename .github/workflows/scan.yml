@@ -1,0 +1,80 @@
+name: Scan eCourts
+
+on:
+  # Fallback timer. GitHub often starts these hours late; the on-time start comes from Vercel Cron
+  # calling /api/cron/scan, which dispatches this workflow.
+  schedule:
+    - cron: "30 1 * * *"   # 07:00 IST
+    - cron: "30 11 * * *"  # 17:00 IST
+  workflow_dispatch:
+    inputs:
+      trigger:
+        description: "schedule when started by the Vercel timer, manual otherwise"
+        default: "manual"
+      years:
+        description: "Registration years to scan, space separated (blank = current year)"
+        default: ""
+      detail_budget:
+        description: "Max case-detail pages to fetch"
+        default: "120"
+      only_details:
+        description: "Skip searching, only fetch pending case details"
+        type: boolean
+        default: false
+      company:
+        description: "Only this company (short name, e.g. ICICI Lombard); blank = all"
+        default: ""
+      city:
+        description: "Only courts in this city (e.g. Jaipur); blank = all"
+        default: ""
+
+concurrency:
+  group: ecourts-scan
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: scanner
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      APP_URL: ${{ vars.APP_URL || 'https://haazir-pi.vercel.app' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: scanner/requirements.txt
+      - run: pip install -r requirements.txt
+      - name: Watch requests
+        run: python -m haazir.watch run
+      - name: Scan
+        run: |
+          ARGS="--trigger ${{ github.event_name == 'schedule' && 'schedule' || inputs.trigger || 'manual' }} --detail-budget ${{ inputs.detail_budget || '120' }}"
+          if [ -n "${{ inputs.years }}" ]; then ARGS="$ARGS --years ${{ inputs.years }}"; fi
+          if [ "${{ inputs.only_details }}" = "true" ]; then ARGS="$ARGS --only-details"; fi
+          python -m haazir.scan $ARGS --company "${{ inputs.company }}" --city "${{ inputs.city }}"
+      - name: High Court
+        if: always()
+        run: python -m haazir.highcourt scan --detail-budget 80 --company "${{ inputs.company }}" --city "${{ inputs.city }}"
+      - name: Consumer commissions (e-Jagriti)
+        if: always()
+        run: python -m haazir.consumer scan --city "${{ inputs.city }}"
+      - name: What happened in court (alerts)
+        if: always()
+        run: python -m haazir.events
+      - name: Hearing reminders
+        if: always()
+        run: python -m haazir.reminders
+      - name: Single cases waiting (Find one case)
+        if: always()
+        run: python -m haazir.find run
+      - name: Court searches waiting
+        if: always()
+        run: python -m haazir.lookup run --max-minutes 45

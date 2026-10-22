@@ -1,0 +1,70 @@
+name: Search courts
+
+# Started from the dashboard's Search cases page (workflow_dispatch with the search id), and by Watch.
+# Searches left waiting are also picked up at the end of every scheduled scan (scan.yml).
+on:
+  workflow_dispatch:
+    inputs:
+      lookup_id:
+        description: "Search to run (blank = every waiting search)"
+        default: ""
+      find_id:
+        description: "Find one case by CNR (Search courts -> Find one case); skips the searches"
+        default: ""
+      chain:
+        description: "How many runs in a row this search has started itself (stops at 30)"
+        default: "0"
+
+# A run may start the next one itself (Carry on), so a long search never waits for the scheduled scan.
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: court-search
+  cancel-in-progress: false
+
+jobs:
+  search:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    defaults:
+      run:
+        working-directory: scanner
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: scanner/requirements.txt
+      - run: pip install -r requirements.txt
+      - name: Find one case
+        if: always()
+        run: if [ -n "${{ inputs.find_id }}" ]; then python -m haazir.find run --id "${{ inputs.find_id }}"; else python -m haazir.find run; fi
+      - name: Search
+        if: inputs.find_id == ''
+        run: |
+          if [ -n "${{ inputs.lookup_id }}" ]; then python -m haazir.lookup run --id "${{ inputs.lookup_id }}"; else python -m haazir.lookup run; fi
+      - name: Watch requests
+        if: always() && inputs.find_id == ''
+        run: python -m haazir.watch run
+      - name: Carry on
+        # A search that ran out of time is back in the queue: start the next run now instead of waiting for the
+        # scheduled scan. Same search first; at most 30 runs in a row, so a court site that keeps refusing cannot loop forever.
+        if: always() && inputs.find_id == ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          chain="${{ inputs.chain }}"; chain="${chain:-0}"
+          next=$(python -m haazir.lookup next --id "${{ inputs.lookup_id }}")
+          if [ -z "$next" ]; then echo "Nothing left to search."; exit 0; fi
+          if [ "$chain" -ge 30 ]; then echo "30 runs in a row; the scheduled scan carries on."; exit 0; fi
+          id="$next"; [ "$next" = "all" ] && id=""
+          curl -sf -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/lookup.yml/dispatches" \
+            -d "{\"ref\":\"main\",\"inputs\":{\"lookup_id\":\"$id\",\"chain\":\"$((chain + 1))\"}}"
+          echo "Started the next run (${next})."
