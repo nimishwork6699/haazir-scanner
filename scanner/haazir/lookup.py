@@ -102,11 +102,12 @@ def district_rows(entries: list[dict], years: list[int], lookup_id: str, seq0: i
     """Court searches for district court complexes: one per establishment where the portal needs one picked
     (so ten workers can share even a single busy complex), one per complex otherwise, for each year."""
     rows, seq = [], seq0
-    for e in entries:
-        ests = [x for x in (e["court"].get("est_codes") or "").split(",") if x] if e["court"].get("needs_est") else [""]
-        for est in ests:
-            court = {**e["court"], "est_codes": est} if est else e["court"]
-            for y in years:
+    # Newest year first across every court, so the most recent cases come in first on an "All years" search.
+    for y in years:
+        for e in entries:
+            ests = [x for x in (e["court"].get("est_codes") or "").split(",") if x] if e["court"].get("needs_est") else [""]
+            for est in ests:
+                court = {**e["court"], "est_codes": est} if est else e["court"]
                 rows.append({"lookup_id": lookup_id, "seq": seq, "forum": "district", "year": y, "payload": {**e, "court": court}})
                 seq += 1
     return rows
