@@ -277,12 +277,12 @@ def tasks_of(db: DB, lookup_id: str) -> list[dict]:
     return db.select("lookup_tasks", f"select=*&lookup_id=eq.{lookup_id}&order=seq")
 
 
-async def plan(db: DB, row: dict) -> int:
-    """Write the search's court searches: states still to be listed first (so listing starts at once), then High
-    Courts, consumer commissions and district courts, one place from each state in turn. Returns how many."""
+def plan_rows(row: dict, courts: dict) -> list[dict]:
+    """The search's court searches, in the order workers take them: states still to be listed first (so listing
+    starts at once), then High Courts, consumer commissions and district courts, one place from each state in turn.
+    Pure (no network, no database), so haazir.search_check can test every kind of search without running one."""
     lid = row["id"]
     years = sorted(row["years"], reverse=True)
-    courts = await area(db, row)
     index, district, hc, cons = courts["index"], courts["district"], courts["high_court"], courts["consumer"]
     rows, seq = [], 0
     for p in index:
@@ -293,10 +293,24 @@ async def plan(db: DB, row: dict) -> int:
             for y in years:
                 rows.append({"lookup_id": lid, "seq": seq, "forum": forum, "year": y, "payload": e})
                 seq += 1
-    rows = ranked(rows + district_rows(mixed(district), years, lid, seq))
+    return ranked(rows + district_rows(mixed(district), years, lid, seq))
+
+
+def write_tasks(db: DB, rows: list[dict]) -> None:
     for i in range(0, len(rows), 500):
         db.insert("lookup_tasks", rows[i:i + 500], upsert_on="lookup_id,seq", ignore_duplicates=True)
+
+
+async def plan(db: DB, row: dict) -> int:
+    """List the search's courts and write its court searches. Returns how many."""
+    rows = plan_rows(row, await area(db, row))
+    write_tasks(db, rows)
     return len(rows)
+
+
+def workers_for(open_tasks: int) -> int:
+    """How many cloud workers to start: one per open court search, up to MAX_WORKERS."""
+    return max(1, min(MAX_WORKERS, open_tasks)) if open_tasks else 0
 
 
 def start(db: DB, row: dict) -> bool:
@@ -347,14 +361,22 @@ class Job:
 
     def report(self, force: bool = False) -> None:
         """Shared progress and heartbeat; finds out when a person stopped the search from the dashboard."""
-        if not force and time.time() - self.last_save < 6:
+        if not force and time.time() - self.last_save < 15:
             return
-        c = counts(self.db, self.row["id"])
+        try:
+            c = counts(self.db, self.row["id"])
+        except Exception as exc:  # the database is busy for a moment: report next time, keep searching
+            print(f"  {self.worker}: progress not saved ({type(exc).__name__}); carrying on", flush=True)
+            self.last_save = time.time()
+            return
         listing = int(c.get("listing") or 0)
         now_text = f"Listing courts in {listing} state{'s' if listing != 1 else ''} while searching" if listing else self.now_text
-        saved = self.db.update("lookups", f"id=eq.{self.row['id']}&status=eq.running",
-                               {"progress": {**c, "now": now_text, "more": c.get("held") or 0}, "heartbeat": now()})
-        self.stopped = self.stopped or not saved
+        try:
+            saved = self.db.update("lookups", f"id=eq.{self.row['id']}&status=eq.running",
+                                   {"progress": {**c, "now": now_text, "more": c.get("held") or 0}, "heartbeat": now()})
+            self.stopped = self.stopped or not saved
+        except Exception as exc:
+            print(f"  {self.worker}: progress not saved ({type(exc).__name__}); carrying on", flush=True)
         self.last_save = time.time()
 
     def keep(self, rows: list[dict], state: str | None) -> int:
@@ -460,7 +482,12 @@ class Job:
         async with contextlib.AsyncExitStack() as stack:
             ec = hc = ej = None
             while time.time() < deadline and not self.stopped and not self.blocked:
-                task = self.claim(name)
+                try:
+                    task = self.claim(name)
+                except Exception as exc:  # the database is busy for a moment: wait and ask again, never give up the lane
+                    print(f"  {self.worker}/{name}: could not take a court ({type(exc).__name__}); trying again shortly", flush=True)
+                    await asyncio.sleep(15)
+                    continue
                 if not task:
                     return
                 try:
@@ -567,8 +594,8 @@ def main() -> int:
             output(id="", workers="[]")
             return 0
         open_tasks = asyncio.run(prepare(db, rows[0]))
-        k = max(1, min(MAX_WORKERS, open_tasks))
-        output(id=rows[0]["id"], workers=json.dumps(list(range(1, k + 1)) if open_tasks else []))
+        k = workers_for(open_tasks)
+        output(id=rows[0]["id"], workers=json.dumps(list(range(1, k + 1))))
         if not open_tasks:
             finish_if_done(db, rows[0])
         return 0
