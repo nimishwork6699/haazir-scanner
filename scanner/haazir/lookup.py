@@ -84,9 +84,11 @@ def year_of(number: str | None) -> int | None:
     return int(m.group(1)) if m else None
 
 
-def counts(db: DB, lookup_id: str) -> dict:
-    """The search's progress, counted from the tables so ten workers never overwrite each other's numbers."""
-    return db._check(db.http.post("/rpc/lookup_counts", json={"lid": lookup_id})) or {}
+def counts(db: DB, lookup_id: str, fresh: bool = False) -> dict:
+    """The search's progress, counted from the tables so the workers never overwrite each other's numbers. Shared
+    and up to 20 seconds old, or counted afresh (fresh=True) where a decision depends on it: finishing, carrying on."""
+    fn = "lookup_counts_now" if fresh else "lookup_counts"
+    return db._check(db.http.post(f"/rpc/{fn}", json={"lid": lookup_id})) or {}
 
 
 def state_found(db: DB, lookup_id: str, state: str) -> int:
@@ -513,7 +515,7 @@ class Job:
 
 def finish_if_done(db: DB, row: dict) -> None:
     """The last worker to find nothing left closes the search."""
-    c = counts(db, row["id"])
+    c = counts(db, row["id"], fresh=True)
     if int(c.get("open") or 0) or int(c.get("listing") or 0):
         return
     held = int(c.get("held") or 0)
@@ -522,7 +524,10 @@ def finish_if_done(db: DB, row: dict) -> None:
         # Watching an all-India search adds only the courts where cases were found.
         summary = db._check(db.http.post("/rpc/lookup_summary", json={"lid": row["id"]})) or {}
         progress["courts"] = len(summary.get("courts") or [])
-    db.update("lookups", f"id=eq.{row['id']}&status=eq.running", {"status": "done", "finished_at": now(), "progress": progress})
+    if db.update("lookups", f"id=eq.{row['id']}&status=eq.running", {"status": "done", "finished_at": now(), "progress": progress}) and not held:
+        # The list of court searches was only the search's to-do list (often the biggest thing in the database):
+        # once every court is done it goes, and the results and totals stay. Kept while "Load more" still needs it.
+        db.http.delete(f"/lookup_tasks?lookup_id=eq.{row['id']}")
 
 
 async def work(db: DB, row: dict, worker: str, deadline: float, lanes: int = LANES) -> None:
@@ -614,7 +619,7 @@ def main() -> int:
 
     if args.cmd == "next":
         rows = db.select("lookups", f"select=id&id=eq.{args.id}&status=in.(queued,running)") if args.id else []
-        if rows and int(counts(db, args.id).get("open") or 0):
+        if rows and int(counts(db, args.id, fresh=True).get("open") or 0):
             print(args.id)
         return 0
 

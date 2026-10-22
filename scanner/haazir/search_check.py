@@ -220,6 +220,14 @@ def check_workers(db: DB, portals: Portals, rep: Report, made: list[str]) -> Non
     db.update("lookups", f"id=eq.{row['id']}", {"status": "stopped"})
     a.report(force=True)
     rep.check(a.stopped, "Stop from the dashboard is noticed by the workers")
+    # Finishing: the last worker closes the search, and its to-do list goes while the results stay.
+    db.http.patch(f"/lookup_tasks?lookup_id=eq.{row['id']}", json={"done": True, "held": False})
+    db.update("lookups", f"id=eq.{row['id']}", {"status": "running"})
+    L.finish_if_done(db, row)
+    left = db.http.get(f"/lookup_tasks?select=id&lookup_id=eq.{row['id']}", headers={"Prefer": "count=exact", "Range": "0-0"})
+    status = db.select("lookups", f"select=status&id=eq.{row['id']}")[0]["status"]
+    rep.check(status == "done" and left.headers.get("content-range", "").endswith("/0"),
+              f"a finished search is marked done and its to-do list is cleared (status {status})")
 
 
 def check_big_write(db: DB, portals: Portals, rep: Report, made: list[str]) -> None:
