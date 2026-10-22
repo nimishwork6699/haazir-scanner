@@ -113,6 +113,17 @@ def district_rows(entries: list[dict], years: list[int], lookup_id: str, seq0: i
     return rows
 
 
+def ranked(rows: list[dict]) -> list[dict]:
+    """Each court search's turn within its state and kind of court (0, 1, 2...), in the order written. Workers take
+    turn 0 of every state, then turn 1..., so all states fill in together (claim_lookup_task orders by rank)."""
+    seen: dict[tuple, int] = {}
+    for r in rows:
+        key = (r["forum"], r["payload"].get("state"))
+        r["rank"] = 0 if r["forum"] == "index" else seen.get(key, 0)
+        seen[key] = r["rank"] + 1
+    return rows
+
+
 def mixed(entries: list[dict]) -> list[dict]:
     """One court from each state, district and complex in turn, so every place's cases start arriving at once."""
     by_state: dict[str, list[dict]] = {}
@@ -282,7 +293,7 @@ async def plan(db: DB, row: dict) -> int:
             for y in years:
                 rows.append({"lookup_id": lid, "seq": seq, "forum": forum, "year": y, "payload": e})
                 seq += 1
-    rows += district_rows(mixed(district), years, lid, seq)
+    rows = ranked(rows + district_rows(mixed(district), years, lid, seq))
     for i in range(0, len(rows), 500):
         db.insert("lookup_tasks", rows[i:i + 500], upsert_on="lookup_id,seq", ignore_duplicates=True)
     return len(rows)
@@ -372,7 +383,7 @@ class Job:
         self.now_text = f"Listing courts in {p['state']}"
         entries = await list_state(self.db, ec, p["state_code"], p["state"], p.get("district_code"))
         years = sorted(self.row["years"], reverse=True)
-        rows = district_rows(mixed(entries), years, self.row["id"], 1_000_000 + task["seq"] * 20_000)
+        rows = ranked(district_rows(mixed(entries), years, self.row["id"], 1_000_000 + task["seq"] * 200_000))
         for i in range(0, len(rows), 500):
             self.db.insert("lookup_tasks", rows[i:i + 500], upsert_on="lookup_id,seq", ignore_duplicates=True)
         self.finish(task, 0, False)
