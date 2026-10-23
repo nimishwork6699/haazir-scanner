@@ -66,16 +66,39 @@ def case_fields(d, cnr: str) -> dict:
     }
 
 
-async def fetch(cnr: str) -> dict:
+TRIES = 3            # court websites are often slow or drop a connection: try again before giving up
+WAIT_BETWEEN = (15, 45)  # seconds before the 2nd and 3rd try
+
+
+class SiteDown(Exception):
+    """The court website did not answer after every try."""
+
+
+async def fetch_once(cnr: str):
     if cnr[2:4] == "HC":
         async with HighCourt() as hc:
             d, _ = await hc.detail(cnr)
     else:
         async with ECourts() as ec:
             d = await ec.detail(cnr)
-    if not d or not (d.petitioners or d.respondents or d.case_type):
-        raise LookupError("The courts have no case with this CNR")
-    return case_fields(d, cnr)
+    return d
+
+
+async def fetch(cnr: str) -> dict:
+    last: Exception | None = None
+    for attempt in range(TRIES):
+        if attempt:
+            await asyncio.sleep(WAIT_BETWEEN[min(attempt - 1, len(WAIT_BETWEEN) - 1)])
+        try:
+            d = await fetch_once(cnr)
+        except Exception as exc:  # timeouts, dropped connections, a busy court site
+            last = exc
+            print(f"{cnr}: try {attempt + 1} of {TRIES} failed ({type(exc).__name__})", flush=True)
+            continue
+        if not d or not (d.petitioners or d.respondents or d.case_type):
+            raise LookupError("The courts have no case with this CNR")
+        return case_fields(d, cnr)
+    raise SiteDown(f"{type(last).__name__ if last else 'no answer'}")
 
 
 def run_one(db: DB, row: dict) -> None:
@@ -88,7 +111,9 @@ def run_one(db: DB, row: dict) -> None:
                                                        **({"case_id": known[0]["id"]} if known else {})})
         print(f"{row['cnr']}: {result.get('title')}", flush=True)
     except Exception as exc:
-        msg = str(exc) if isinstance(exc, LookupError) else f"Could not read the case from the court site ({type(exc).__name__}). Try again in a while."
+        msg = (str(exc) if isinstance(exc, LookupError)
+               else f"The court website is not answering (tried {TRIES} times). Try again later." if isinstance(exc, SiteDown)
+               else f"Could not read the case from the court site ({type(exc).__name__}). Try again in a while.")
         db.update("case_finds", f"id=eq.{row['id']}", {"status": "failed", "error": msg[:300], "finished_at": now()})
         print(f"{row['cnr']}: failed {type(exc).__name__}: {str(exc)[:200]}", flush=True)
 

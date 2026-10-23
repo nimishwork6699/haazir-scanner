@@ -40,7 +40,7 @@ from .ecourts import Blocked, ECourts
 from .highcourt import HighCourt
 from .matching import is_company, normalise
 
-MAX_WORKERS = 20       # cloud runners per search (lookup.yml), each with its own address; GitHub Free runs at most 20 jobs at once
+MAX_WORKERS = 18       # cloud runners per search (lookup.yml), each with its own address; GitHub Free runs 20 jobs at once, so 2 stay free for Find one case and small searches
 LANES = 2              # court sessions per runner at once; eCourts blocked an address at about six
 INDEX_DAYS = 14        # a state's list of court complexes is listed again after this long
 STALE_MINUTES = 30     # a running search with no heartbeat for this long has lost its workers
