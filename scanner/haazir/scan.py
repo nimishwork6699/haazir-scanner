@@ -16,7 +16,7 @@ from . import config, telegram
 from .classify import categorize
 from .db import DB
 from .ecourts import Blocked, ECourts, LayoutError
-from .matching import is_company, normalise, role
+from .matching import is_company, normalise, role, title_of
 from . import orders
 from .suggest import rank
 
@@ -50,7 +50,7 @@ def disposal_of(html: str) -> str | None:
 class Run:
     def __init__(self, db: DB, trigger: str) -> None:
         self.db = db
-        self.row = db.insert("scan_runs", {"trigger": trigger})[0]
+        self.row = db.insert("scan_runs", {"trigger": trigger}, returning="*")[0]
         self.stats = {"searches": 0, "search_failures": 0, "results": 0, "new_cases": 0, "details_fetched": 0}
         self.log: list[dict] = []
         self.blocked = False
@@ -166,7 +166,7 @@ async def search_phase(run: Run, ec: ECourts, years: list[int], status: str, bas
                         "court_id": court["id"],
                         "case_type": r.case_type or None,
                         "case_number": r.case_number or None,
-                        "title": f"{r.petitioner} vs {r.respondent}".strip(" vs"),
+                        "title": title_of(r.petitioner, r.respondent),
                         "petitioners": [{"name": r.petitioner, "advocate": ""}] if r.petitioner else [],
                         "respondents": [{"name": r.respondent, "advocate": ""}] if r.respondent else [],
                         # The search list sometimes shows only the matched party, so its order is not
@@ -177,7 +177,8 @@ async def search_phase(run: Run, ec: ECourts, years: list[int], status: str, bas
                         "raw_search": r.to_dict() if hasattr(r, "to_dict") else {"petitioner": r.petitioner, "respondent": r.respondent},
                     })
                 if new_rows:
-                    inserted = db.insert("cases", new_rows, upsert_on="cnr", ignore_duplicates=True)
+                    inserted = db.insert("cases", new_rows, upsert_on="cnr", ignore_duplicates=True,
+                                         returning="id,is_baseline")
                     for c in inserted:
                         db.log(c["id"], "detected", {"court": court["complex_name"], "baseline": c["is_baseline"],
                                                     "term": t["term"]})
@@ -305,7 +306,7 @@ async def detail_phase(run: Run, ec: ECourts, budget: int) -> None:
             "respondents": resps,
             "petitioner_advocate": (pets[0]["advocate"] or None) if pets else None,
             "acts": acts,
-            "title": f"{lead_pet} vs {lead_resp}".strip(" vs") or None,
+            "title": title_of(lead_pet, lead_resp),
             "category": categorize(d.case_type, acts_text),
             "detail_fetched_at": now(),
             "detail_error": None,
@@ -325,7 +326,7 @@ async def detail_phase(run: Run, ec: ECourts, budget: int) -> None:
                 values["company_role"] = "respondent"  # the insurer is a respondent to a claim by law
                 values["role_source"] = "inferred_mact"
                 lead_resp = f"{lead_resp} and insurer" if lead_resp else ""
-                values["title"] = f"{lead_pet} vs {lead_resp}".strip(" vs") or None
+                values["title"] = title_of(lead_pet, lead_resp)
         elif pets or resps:
             # Neither the search row nor the case page names the company (e.g. "United India Traders").
             values["status"] = "not_ours"

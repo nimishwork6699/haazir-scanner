@@ -10,6 +10,7 @@ message is sent once per case, advocate, kind and date.
 """
 
 import html
+import re
 import sys
 from datetime import date, datetime, timedelta, timezone
 
@@ -36,7 +37,7 @@ def link(case_id: str) -> str:
 def claim(db: DB, case_id: str, advocate_id: str | None, kind: str, ref_date: str) -> dict | None:
     """Reserve the right to send this message once. None when it was already sent."""
     rows = db.insert("notifications", {"case_id": case_id, "advocate_id": advocate_id, "kind": kind, "ref_date": ref_date},
-                     upsert_on="case_id,advocate_id,kind,ref_date", ignore_duplicates=True)
+                     upsert_on="case_id,advocate_id,kind,ref_date", ignore_duplicates=True, returning="*")
     return rows[0] if rows else None
 
 
@@ -52,6 +53,23 @@ def deliver(db: DB, note: dict, chat: int, text: str, case_id: str, prompt_kind:
     except Exception as exc:
         db.update("notifications", f"id=eq.{note['id']}", {"status": "failed", "error": str(exc)[:300]})
         return False
+
+
+EMPTY_BUSINESS = re.compile(r"^\s*(fp|f\.p\.?|work done as per order ?sheet|as per order ?sheet|order ?sheet|-+)\s*\.?\s*$", re.I)
+
+
+def last_hearings(db: DB, case_id: str) -> str:
+    """The case's last 3 hearings in a few lines (database function last_hearings, the same as the case page)."""
+    rows = db._check(db.http.post("/rpc/last_hearings", json={"cid": case_id, "n": 3})) or []
+    lines = []
+    for h in rows:
+        business = h.get("business") if h.get("business") and not EMPTY_BUSINESS.match(h["business"]) else None
+        what = h.get("order_summary") or business or (f"listed for {h['purpose'].lower()}" if h.get("purpose") else "no order or note yet")
+        if len(what) > 160:
+            what = what[:157].rsplit(" ", 1)[0] + "…"
+        extra = " Nobody appeared for us." if h.get("nobody_for_us") else ""
+        lines.append(f"• {fmt(h['date'])}: {html.escape(what)}{extra}")
+    return ("\n\n<b>Last hearings</b>\n" + "\n".join(lines)) if lines else ""
 
 
 def main() -> int:
@@ -71,7 +89,7 @@ def main() -> int:
         when = "today" if days == 0 else "tomorrow" if days == 1 else f"in {days} days"
         court = (c.get("court") or {}).get("complex_name", "")
         text = (f"<b>Hearing {when}</b>\n{html.escape(c['title'] or '')}\n{html.escape(court)} · {html.escape(c['case_number'] or '')}\n"
-                f"<b>{fmt(c['next_hearing_date'])}</b>\n\nWill you appear?" + link(c["id"]))
+                f"<b>{fmt(c['next_hearing_date'])}</b>" + last_hearings(db, c["id"]) + "\n\nWill you appear?" + link(c["id"]))
         if deliver(db, note, adv["telegram_chat_id"], text, c["id"], "attendance", c["next_hearing_date"],
                    [[("✅ I will appear", "att|y"), ("❌ I can't attend", "att|n")]]):
             db.log(c["id"], "reminder_sent", {"advocate": adv["name"], "hearing": c["next_hearing_date"]}, actor="system")

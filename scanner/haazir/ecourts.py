@@ -124,6 +124,34 @@ class ECourts:
                     merged.append(r)
         return merged
 
+    async def search_advocate(self, court: dict, name: str, status: str = "Pending"):
+        """An advocate's cases at one court complex (no year: the advocate's whole book with that status)."""
+        ests = [e for e in court["est_codes"].split(",") if e] if court["needs_est"] else [""]
+        c = self.client
+        code = c._bare_complex_code(court["complex_code"])
+        merged, seen = [], set()
+        for est in ests:
+            try:
+                result = await c._post_with_captcha_retry(
+                    "casestatus/submitAdvName",
+                    lambda captcha: {"radAdvt": "1", "advocate_name": name, "adv_bar_state": "", "adv_bar_code": "", "adv_bar_year": "",
+                                     "case_status": status, "caselist_date": "", "adv_captcha_code": captcha, "state_code": court["state_code"],
+                                     "dist_code": court["dist_code"], "court_complex_code": code, "est_code": est, "case_type": ""},
+                    state_code=court["state_code"], dist_code=court["dist_code"], court_complex_code=code, est_code=est,
+                )
+                rows = parse_results(result.get("adv_data", "") or "")
+            except LayoutError:
+                raise
+            except Exception as exc:
+                if _is_block(exc):
+                    raise Blocked() from exc
+                raise
+            for r in rows:
+                if r.cnr_number not in seen:
+                    seen.add(r.cnr_number)
+                    merged.append(r)
+        return merged
+
     async def detail(self, cnr: str):
         """CNR lookup that keeps one portal session across many cases.
 

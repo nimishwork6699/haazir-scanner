@@ -50,13 +50,13 @@ async def main() -> int:
             return 0
         if args.off:
             for d in args.districts:
-                n = db.update("courts", f"state_code=eq.{state}&dist_code=eq.{pick(districts, d, 'district')}", {"active": False})
+                n = db.update("courts", f"state_code=eq.{state}&dist_code=eq.{pick(districts, d, 'district')}", {"active": False}, returning="id")
                 print(f"  {d}: {len(n)} courts switched off")
             return 0
         if not args.zone:
             raise SystemExit("--zone is required when adding courts")
         city = args.zone.replace(" Zone", "")
-        zone = db.insert("zones", {"name": args.zone, "city": city}, upsert_on="name")[0]
+        zone = db.insert("zones", {"name": args.zone, "city": city}, upsert_on="name", returning="*")[0]
         rows = []
         for d in args.districts:
             dc = pick(districts, d, "district")

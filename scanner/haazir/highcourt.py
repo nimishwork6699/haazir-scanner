@@ -28,7 +28,7 @@ from .captcha import MultiReadSolver
 from .classify import categorize
 from .db import DB
 from .ecourts import CNR_RE
-from .matching import is_company, role
+from .matching import is_company, role, title_of
 from .scan import disposal_of, refresh_suggestions
 from . import orders as court_orders
 from . import places
@@ -95,6 +95,17 @@ class HighCourt:
             raise RuntimeError(f"High Court results not read cleanly: {len(bad)} of {len(rows)} rows without a CNR")
         return rows
 
+    async def search_advocate(self, court_code: str, bench: str, name: str):
+        """An advocate's pending cases at one High Court bench (no year)."""
+        court = get_court(court_code)
+        resp = await self.client._post_with_captcha_retry(endpoints.SHOW_RECORDS_URL, lambda cap: endpoints.case_status_by_advocate_form(
+            state_code=court.state_code, court_code=bench, captcha=cap, advocate_name=name, status_filter="Pending"))
+        rows = parse_case_status(resp.text)
+        bad = [r for r in rows if not CNR_RE.match(r.cnr_number or "")]
+        if bad:
+            raise RuntimeError(f"High Court results not read cleanly: {len(bad)} of {len(rows)} rows without a CNR")
+        return rows
+
     async def detail(self, cnr: str):
         resp = await self.client._post_with_captcha_retry(endpoints.INDEX_QRY_URL, lambda cap: endpoints.case_status_by_cnr_form(cnr=cnr, captcha=cap))
         return parse_case_detail(resp.text, cnr=cnr, base_url=endpoints.BASE_URL), resp.text
@@ -137,7 +148,7 @@ async def scan(db: DB, budget: int, year: int, company: str = "", city: str = ""
                     known.add(r.cnr_number)
                     new.append({"cnr": r.cnr_number, "forum": "high_court", "company_id": t["company_id"], "court_id": court["id"],
                                 "case_type": r.case_type or None, "case_number": f"{r.case_type}/{r.case_number}" if r.case_type else r.case_number,
-                                "title": f"{r.petitioner} vs {r.respondent}".strip(" vs"), "company_role": "unknown",
+                                "title": title_of(r.petitioner, r.respondent), "company_role": "unknown",
                                 "petitioners": [{"name": r.petitioner, "advocate": ""}] if r.petitioner else [],
                                 "respondents": [{"name": r.respondent, "advocate": ""}] if r.respondent else [],
                                 "category": categorize(r.case_type), "is_baseline": baseline,
@@ -184,7 +195,7 @@ async def scan(db: DB, budget: int, year: int, company: str = "", city: str = ""
                     "decision_date": iso(d.decision_date), "stage": d.case_stage or None,
                     "court_judge": d.coram or d.court_number_and_judge or None, "petitioners": pets, "respondents": resps,
                     "petitioner_advocate": (pets[0]["advocate"] or None) if pets else None, "acts": acts,
-                    "title": f"{lead_pet} vs {lead_resp}".strip(" vs") or None,
+                    "title": title_of(lead_pet, lead_resp),
                     "category": "motor_accident" if lc and "mact" in lc["court"].lower() else categorize(d.case_type, " ".join(a["act"] for a in acts)),
                     "detail_fetched_at": now(), "detail_error": None, "updated_at": now(),
                 }
@@ -219,7 +230,7 @@ async def scan(db: DB, budget: int, year: int, company: str = "", city: str = ""
 
 async def add(db: DB, court_code: str, benches: list[str], zone_name: str) -> None:
     court = get_court(court_code)
-    zone = db.insert("zones", {"name": zone_name, "city": zone_name.replace(" Zone", "")}, upsert_on="name")[0]
+    zone = db.insert("zones", {"name": zone_name, "city": zone_name.replace(" Zone", "")}, upsert_on="name", returning="*")[0]
     async with HighCourt() as hc:
         options = await hc.client.list_benches(court)
     for b in benches:
@@ -251,7 +262,7 @@ def main() -> int:
     if args.cmd == "add":
         asyncio.run(add(db, args.court, args.benches, args.zone))
         return 0
-    run = db.insert("scan_runs", {"trigger": "high_court"})[0]
+    run = db.insert("scan_runs", {"trigger": "high_court"}, returning="*")[0]
     t0 = time.time()
     try:
         stats, status = asyncio.run(scan(db, args.detail_budget, args.year, args.company, args.city)), "ok"

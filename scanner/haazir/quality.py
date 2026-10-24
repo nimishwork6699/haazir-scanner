@@ -85,7 +85,7 @@ async def run(n_district: int, n_hc: int, n_consumer: int) -> dict:
 
 def main() -> int:
     db = DB()
-    row = db.insert("scan_runs", {"trigger": "quality"})[0]
+    row = db.insert("scan_runs", {"trigger": "quality"}, returning="*")[0]
     try:
         r = asyncio.run(run(8, 4, 4))
         status = "ok" if not r["errors"] else "partial"

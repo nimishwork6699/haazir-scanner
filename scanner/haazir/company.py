@@ -55,7 +55,7 @@ def main() -> int:
     if args.cmd == "add":
         names = [n.lower().strip() for n in args.names]
         row = db.insert("companies", {"name": args.name, "short_name": args.short, "sector": args.sector},
-                        upsert_on="name")[0]
+                        upsert_on="name", returning="id")[0]
         for term in args.search:
             db.insert("watch_terms", {"company_id": row["id"], "term": term, "confirm": names, "active": True},
                       upsert_on="company_id,term")

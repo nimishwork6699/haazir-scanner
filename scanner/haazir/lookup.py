@@ -38,12 +38,18 @@ from .consumer import EJagriti
 from .db import DB
 from .ecourts import Blocked, ECourts
 from .highcourt import HighCourt
+from .nclt import BENCHES as NCLT_BENCHES, NCLT
 from .matching import is_company, normalise
 
 MAX_WORKERS = 18       # cloud runners per search (lookup.yml), each with its own address; GitHub Free runs 20 jobs at once, so 2 stay free for Find one case and small searches
 LANES = 2              # court sessions per runner at once; eCourts blocked an address at about six
 INDEX_DAYS = 14        # a state's list of court complexes is listed again after this long
 STALE_MINUTES = 30     # a running search with no heartbeat for this long has lost its workers
+NCDRC = 11000000       # the National Commission's id on e-Jagriti (searched with the consumer commissions)
+REUSE_DAYS = 7         # a court's answer for a name and year is used again for this long instead of asking again
+SMALL_SEARCH = 2000    # court searches up to this many: 3 court sessions per runner instead of 2 (trial)
+LANES_SMALL = int(os.environ.get("HAAZIR_LANES_SMALL", "3"))
+LIKELY = re.compile(r"m\.?\s?a\.?\s?c\.?\s?t|motor|accident|claims", re.I)  # accident claim tribunals: insurers' busiest courts
 
 # eCourts state name -> High Court codes in the court library. One High Court can serve several states.
 STATE_HC = {
@@ -66,13 +72,46 @@ def ago(minutes: float) -> str:
     return (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat().replace("+00:00", "Z")
 
 
+# Claims where the law makes the insurer a respondent: motor accident claims (MV Act s.166: MACT, MACP, MCOP, M.V.C.,
+# MVOP, OP(MV)…) and employees' compensation claims (EC Act: WC, WCA, ECA). The court's own spellings, from the ICICI
+# all-India search.
+CLAIM_TYPE = re.compile(r"m\.?\s?a\.?\s?c(?!\.?\s?a\b)|motor|mot\.?\s?acc|m\.?\s?c\.?\s?o\.?\s?p|m\.?\s?v\.?\s?(c|op)\b"
+                        r"|o\.?\s?p\.?\s?\(?\s?m\.?\s?v|\bw\.?\s?c\b|w\.?c\.?a|w\.c\.f|\be\.?\s?c\.?\s?a\b|employees?'?\s?comp"
+                        r"|workm[ae]n|claim\s?(petition|case)", re.I)
+# Not the claim itself: appeals, executions, reviews and miscellaneous applications, where an insurer can be either
+# side. These are read from the case page instead.
+NOT_CLAIM = re.compile(r"app|fao|revis|review|misc|\bm\.?\s?a\b(?!\.?\s?c)|macma|macm\b|\bmis\b|mjc|exe|execution|darkhast|dkst|\bep\b|\bex\b"
+                       r"|transfer|restor", re.I)
+INSURER = re.compile(r"insu|insr|assur|\bins\b|\bins\.|lombard|ergo|allianz|tokio|sompo|generali|chola|iffco|sundaram"
+                     r"|\bdigit\b|acko|\bgic\b|reliance gen|new india|united india|oriental|national ins|liberty gen|magma"
+                     r"|kotak gen|sbi gen|tata aig|shriram gen|raheja|zuno|navi gen", re.I)
+
+
+def insurer_by_law(term: str, petitioner: str, respondent: str, case_type: str) -> bool:
+    """An insurer named in an accident or employees' compensation claim: always a respondent."""
+    ct = case_type or ""
+    return bool(CLAIM_TYPE.search(ct) and not NOT_CLAIM.search(ct)
+                and (INSURER.search(term or "") or INSURER.search(f"{petitioner} {respondent}")))
+
+
+def placed(term: str, petitioner: str, respondent: str, case_type: str = "") -> tuple[str, str, str]:
+    """(petitioner, respondent, side) for a row of a court's list. The list puts the one name it shows in the
+    petitioner column; when the law makes that name the respondent, it is moved there."""
+    side = side_of(term, petitioner, respondent, case_type)
+    pet, resp = (petitioner or "").strip(), (respondent or "").strip()
+    if side == "respondent" and pet and not resp:
+        pet, resp = "", pet
+    return pet, resp, side
+
+
 def side_of(term: str, petitioner: str, respondent: str, case_type: str = "") -> str:
     """Which side the searched name is on, as far as the court's list shows it.
 
     The list sometimes shows only the matched party ("SBI General Insurance vs"), and then its position says
-    nothing about the side: "unknown". A motor accident claim names the insurer as respondent by law."""
+    nothing about the side: "unknown", until the case page is read (haazir.fill). An insurer in an accident or
+    employees' compensation claim is a respondent by law."""
     on_r, on_p = is_company(respondent or "", [term]), is_company(petitioner or "", [term])
-    if (on_r or on_p) and re.search(r"m\.?\s?a\.?\s?c|motor", case_type or "", re.I) and re.search(r"insur|assur", f"{petitioner} {respondent}", re.I):
+    if (on_r or on_p) and insurer_by_law(term, petitioner, respondent, case_type):
         return "respondent"
     if not (petitioner or "").strip() or not (respondent or "").strip():
         return "unknown"
@@ -100,6 +139,46 @@ def state_found(db: DB, lookup_id: str, state: str) -> int:
 
 # ---------------------------------------------------------------- the court list
 
+def task_key(forum: str, p: dict) -> str | None:
+    """The court a court search asks, the same in every search: its answers are kept and reused by this key."""
+    if forum == "district":
+        c = p["court"]
+        est = (c.get("est_codes") or "") if c.get("needs_est") else ""
+        return f"d|{c['state_code']}|{c['dist_code']}|{c['complex_code']}|{est}"
+    if forum == "high_court":
+        return f"h|{p['code']}|{p['bench']}"
+    if forum == "consumer":
+        return f"c|{p['cid']}"
+    if forum == "nclt":
+        return f"n|{p['bench']}"
+    return None
+
+
+def complex_of(key: str) -> str:
+    """A district key without its establishment: the complex a court list names."""
+    return key.rsplit("|", 1)[0] if key.startswith("d|") else key
+
+
+def complex_scores(scores: dict[str, tuple[int, int]]) -> dict[str, tuple[int, int]]:
+    """Answers are kept per establishment; courts are ordered per complex."""
+    out: dict[str, tuple[int, int]] = {}
+    for k, (m, e) in scores.items():
+        c = complex_of(k)
+        a, b = out.get(c, (0, 0))
+        out[c] = (a + m, b + e)
+    return out
+
+
+def likely_first(entries: list[dict], forum: str, scores: dict[str, tuple[int, int]]) -> list[dict]:
+    """Courts most likely to have the name's cases first (stable, so states keep their own order): where it was
+    found before, then accident claim tribunals, then the courts busiest for every name searched lately."""
+    def order(e: dict):
+        k = task_key(forum, e)
+        mine, everyone = scores.get(complex_of(k) if k else "", (0, 0))
+        return (-mine, not LIKELY.search(e.get("name") or ""), -everyone)
+    return sorted(entries, key=order)
+
+
 def district_rows(entries: list[dict], years: list[int], lookup_id: str, seq0: int) -> list[dict]:
     """Court searches for district court complexes: one per establishment where the portal needs one picked
     (so ten workers can share even a single busy complex), one per complex otherwise, for each year."""
@@ -110,7 +189,9 @@ def district_rows(entries: list[dict], years: list[int], lookup_id: str, seq0: i
             ests = [x for x in (e["court"].get("est_codes") or "").split(",") if x] if e["court"].get("needs_est") else [""]
             for est in ests:
                 court = {**e["court"], "est_codes": est} if est else e["court"]
-                rows.append({"lookup_id": lookup_id, "seq": seq, "forum": "district", "year": y, "payload": {**e, "court": court}})
+                payload = {**e, "court": court}
+                rows.append({"lookup_id": lookup_id, "seq": seq, "forum": "district", "year": y, "payload": payload,
+                             "key": task_key("district", payload)})
                 seq += 1
     return rows
 
@@ -192,7 +273,7 @@ def add_known(db: DB, row: dict) -> int:
     if not words:
         return 0
     cond = ",".join(f"search_text.imatch.\\m{re.escape(w)}" for w in words)
-    forums = ",".join(f for f in row["forums"] if f in ("district", "high_court", "consumer"))
+    forums = ",".join(f for f in row["forums"] if f in ("district", "high_court", "consumer", "nclt")) + (",ncdrc" if "consumer" in row["forums"] else "")
     cases = db.select("cases", f"select=id,cnr,case_number,case_type,forum,petitioners,respondents,company_role,registration_date,"
                                f"court:courts(state,district_name,complex_name)&and=({quote(cond)})&forum=in.({forums})"
                                f"&status=not.in.(disposed,not_ours)")
@@ -225,11 +306,11 @@ def add_known(db: DB, row: dict) -> int:
 async def area(db: DB, row: dict, list_missing: bool = False) -> dict:
     """Every court in a search's area: district court complexes (from court_index; a state not listed yet goes in
     "index", or is listed now with list_missing), High Court benches and consumer commissions, each with its state."""
-    forums, dist = row["forums"], row.get("district_code")
+    forums, dist = [f for f in row["forums"] if row.get("kind") != "advocate" or f != "consumer"], row.get("district_code")
     whole = row["state_code"] == "all"
     names = wanted_names(row)
     wanted = {normalise(n) for n in names}
-    out: dict = {"index": [], "district": [], "high_court": [], "consumer": []}
+    out: dict = {"index": [], "district": [], "high_court": [], "consumer": [], "nclt": []}
     if "district" in forums:
         async with ECourts() as ec:
             listed = await ec.client.list_states()
@@ -261,6 +342,8 @@ async def area(db: DB, row: dict, list_missing: bool = False) -> dict:
                         out["high_court"].append({"code": code, "bench": b, "name": f"{court.name.split(',')[0]}, {bn}", "state": sname})
     if "consumer" in forums:
         ej = EJagriti()
+        if not dist:  # the National Commission (NCDRC) hears appeals from every state
+            out["consumer"].append({"cid": NCDRC, "name": "National Commission (NCDRC)", "is_state": True, "st_id": NCDRC, "state": None})
         for st in ej.state_commissions():
             sname = st["commissionNameEn"].strip().title()
             if not whole and normalise(st["commissionNameEn"]) not in wanted:
@@ -272,6 +355,9 @@ async def area(db: DB, row: dict, list_missing: bool = False) -> dict:
                 if not dist or normalise(row.get("district_name") or "") in normalise(d["commissionNameEn"]):
                     out["consumer"].append({"cid": d["commissionId"], "name": f"District Commission, {d['commissionNameEn']}", "is_state": False,
                                             "st_id": st["commissionId"], "state": sname})
+    if "nclt" in forums:
+        # Every bench, whatever the place: a company's NCLT cases follow where it is registered.
+        out["nclt"] = [{"bench": b, "name": f"NCLT {n}", "state": None} for b, n in NCLT_BENCHES.items()]
     return out
 
 
@@ -279,23 +365,41 @@ def tasks_of(db: DB, lookup_id: str) -> list[dict]:
     return db.select("lookup_tasks", f"select=*&lookup_id=eq.{lookup_id}&order=seq")
 
 
-def plan_rows(row: dict, courts: dict) -> list[dict]:
+def plan_rows(row: dict, courts: dict, scores: dict[str, tuple[int, int]] | None = None) -> list[dict]:
     """The search's court searches, in the order workers take them: states still to be listed first (so listing
-    starts at once), then High Courts, consumer commissions and district courts, one place from each state in turn.
+    starts at once), then High Courts, consumer commissions and district courts, one place from each state in turn,
+    the likeliest courts of each state first (scores: court_scores).
     Pure (no network, no database), so haazir.search_check can test every kind of search without running one."""
     lid = row["id"]
     years = sorted(row["years"], reverse=True)
-    index, district, hc, cons = courts["index"], courts["district"], courts["high_court"], courts["consumer"]
+    sc = complex_scores(scores or {})
+    index, district, hc, cons, nclt = courts["index"], courts["district"], courts["high_court"], courts["consumer"], courts.get("nclt", [])
     rows, seq = [], 0
     for p in index:
-        rows.append({"lookup_id": lid, "seq": seq, "forum": "index", "year": years[0], "payload": p})
+        rows.append({"lookup_id": lid, "seq": seq, "forum": "index", "year": years[0], "payload": p, "key": None})
         seq += 1
-    for forum, entries in (("high_court", hc), ("consumer", cons)):
-        for e in mixed(entries):
+    for forum, entries in (("high_court", hc), ("consumer", cons), ("nclt", nclt)):
+        for e in mixed(likely_first(entries, forum, sc)):
             for y in years:
-                rows.append({"lookup_id": lid, "seq": seq, "forum": forum, "year": y, "payload": e})
+                rows.append({"lookup_id": lid, "seq": seq, "forum": forum, "year": y, "payload": e, "key": task_key(forum, e)})
                 seq += 1
-    return ranked(rows + district_rows(mixed(district), years, lid, seq))
+    return ranked(rows + district_rows(mixed(likely_first(district, "district", sc)), years, lid, seq))
+
+
+def scores_for(db: DB, term: str) -> dict[str, tuple[int, int]]:
+    rows = db._check(db.http.post("/rpc/court_scores", json={"t": normalise(term)})) or []
+    return {r["key"]: (int(r["mine"] or 0), int(r["everyone"] or 0)) for r in rows}
+
+
+def answer_term(row: dict) -> str:
+    """What a court's answer is kept under: the name searched, and whether it was a party or an advocate."""
+    return ("adv:" if row.get("kind") == "advocate" else "") + normalise(row["party"])
+
+
+def reuse(db: DB, row: dict) -> int:
+    """Court searches answered for this name in the last REUSE_DAYS days: done at once, their cases copied in."""
+    return int(db._check(db.http.post("/rpc/reuse_tasks", json={"lid": row["id"], "t": answer_term(row),
+                                                                "days": REUSE_DAYS})) or 0)
 
 
 def write_tasks(db: DB, rows: list[dict]) -> None:
@@ -304,10 +408,29 @@ def write_tasks(db: DB, rows: list[dict]) -> None:
 
 
 async def plan(db: DB, row: dict) -> int:
-    """List the search's courts and write its court searches. Returns how many."""
-    rows = plan_rows(row, await area(db, row))
+    """List the search's courts and write its court searches, then take the ones answered lately from earlier
+    searches. Returns how many court searches were written."""
+    rows = plan_rows(row, await area(db, row), scores_for(db, row["party"]))
     write_tasks(db, rows)
+    n = reuse(db, row)
+    if n:
+        print(f"  {n} court searches answered by searches in the last {REUSE_DAYS} days", flush=True)
     return len(rows)
+
+
+def expected(db: DB, row: dict, c: dict) -> int:
+    """Open court searches, counting the ones states still to be listed will add (from their last listing, however
+    old), so a search that starts by listing states still gets its full set of workers."""
+    n = int(c.get("open") or 0)
+    if not int(c.get("listing") or 0):
+        return n
+    years = len(row["years"])
+    for t in db.select("lookup_tasks", f"select=id,payload&lookup_id=eq.{row['id']}&forum=eq.index&done=eq.false"):
+        p = t["payload"]
+        q = f"select=est_codes,needs_est&state_code=eq.{p['state_code']}" + (f"&dist_code=eq.{p['district_code']}" if p.get("district_code") else "")
+        listed = db.select("court_index", q + "&order=state_code,dist_code,complex_code")
+        n += sum(len([x for x in (r["est_codes"] or "").split(",") if x]) if r["needs_est"] else 1 for r in listed) * years if listed else MAX_WORKERS
+    return n
 
 
 def workers_for(open_tasks: int) -> int:
@@ -318,7 +441,7 @@ def workers_for(open_tasks: int) -> int:
 def start(db: DB, row: dict) -> bool:
     """Mark a search running, unless someone stopped it meanwhile."""
     return bool(db.update("lookups", f"id=eq.{row['id']}&status=in.(queued,running)",
-                          {"status": "running", "started_at": row.get("started_at") or now(), "error": None, "heartbeat": now()}))
+                          {"status": "running", "started_at": row.get("started_at") or now(), "error": None, "heartbeat": now()}, returning="id"))
 
 
 async def prepare(db: DB, row: dict) -> int:
@@ -330,10 +453,10 @@ async def prepare(db: DB, row: dict) -> int:
         known = add_known(db, row)
         n = await plan(db, row)
         print(f"{row['party']} · {row['state_name']} {row.get('district_name') or ''}: {n} court searches, {known} cases already known", flush=True)
-    c = counts(db, row["id"])
+    c = counts(db, row["id"], fresh=True)
     db.update("lookups", f"id=eq.{row['id']}&status=eq.running",
               {"progress": {**c, "now": "Searching the courts"}, "heartbeat": now()})
-    return int(c.get("open") or 0)
+    return expected(db, row, c)
 
 
 # ---------------------------------------------------------------- working
@@ -353,6 +476,9 @@ class Job:
         self.last_save = 0.0
         self.now_text = ""
         self.capped: dict[str, float] = {}  # state -> when it was last seen at its cap
+        self.advocate = row.get("kind") == "advocate"  # an advocate's cases, not a party's
+        self.answer_term = answer_term(row)
+        self.scores: dict[str, tuple[int, int]] | None = None  # court_scores, fetched when a state is listed
 
     def claim(self, lane: str) -> dict | None:
         rows = self.db._check(self.db.http.post("/rpc/claim_lookup_task", json={"lid": self.row["id"], "worker": f"{self.worker}/{lane}"})) or []
@@ -375,22 +501,33 @@ class Job:
         now_text = f"Listing courts in {listing} state{'s' if listing != 1 else ''} while searching" if listing else self.now_text
         try:
             saved = self.db.update("lookups", f"id=eq.{self.row['id']}&status=eq.running",
-                                   {"progress": {**c, "now": now_text, "more": c.get("held") or 0}, "heartbeat": now()})
+                                   {"progress": {**c, "now": now_text, "more": c.get("held") or 0}, "heartbeat": now()}, returning="id")
             self.stopped = self.stopped or not saved
         except Exception as exc:
             print(f"  {self.worker}: progress not saved ({type(exc).__name__}); carrying on", flush=True)
         self.last_save = time.time()
 
-    def keep(self, rows: list[dict], state: str | None) -> int:
-        rows = [{**r, "lookup_id": self.row["id"], "state": state} for r in rows if not self.short or r["side"] != "unknown"]
+    def keep(self, rows: list[dict], state: str | None) -> tuple[int, list[str]]:
+        """Save a court's rows; returns how many are new to this search, and the CNRs of all it kept."""
+        rows = [{**r, "lookup_id": self.row["id"], "state": state} for r in rows if self.advocate or not self.short or r["side"] != "unknown"]
         n = 0
         # Count only rows new to this search: a case can appear in two courts' lists.
         for i in range(0, len(rows), 500):
-            n += len(self.db.insert("lookup_results", rows[i:i + 500], upsert_on="lookup_id,cnr", ignore_duplicates=True))
-        return n
+            n += len(self.db.insert("lookup_results", rows[i:i + 500], upsert_on="lookup_id,cnr", ignore_duplicates=True,
+                                    returning="cnr"))
+        return n, [r["cnr"] for r in rows]
 
-    def finish(self, task: dict, found: int, failed: bool) -> None:
-        self.db.update("lookup_tasks", f"id=eq.{task['id']}", {"done": True, "found": found, "failed": failed})
+    def finish(self, task: dict, found: int, failed: bool, hits: int = 0, cnrs: list[str] | None = None) -> None:
+        """Mark a court search done and keep the court's answer for the name (reused for REUSE_DAYS days)."""
+        self.db._check(self.db.http.post("/rpc/finish_lookup_task", json={
+            "tid": task["id"], "n_found": found, "did_fail": failed, "n_hits": hits, "t": self.answer_term, "found_cnrs": cnrs or []}))
+
+    def listing(self) -> bool:
+        """A state's courts are being listed right now (by another lane or worker)."""
+        try:
+            return bool(self.db.select("lookup_tasks", f"select=id&lookup_id=eq.{self.row['id']}&forum=eq.index&done=eq.false&limit=1"))
+        except Exception:
+            return False
 
     def at_cap(self, state: str) -> bool:
         if self.cap >= 100000:
@@ -407,11 +544,16 @@ class Job:
         self.now_text = f"Listing courts in {p['state']}"
         entries = await list_state(self.db, ec, p["state_code"], p["state"], p.get("district_code"))
         years = sorted(self.row["years"], reverse=True)
-        rows = ranked(district_rows(mixed(entries), years, self.row["id"], 1_000_000 + task["seq"] * 200_000))
+        if self.scores is None:
+            self.scores = complex_scores(scores_for(self.db, self.term))
+        rows = ranked(district_rows(mixed(likely_first(entries, "district", self.scores)), years, self.row["id"],
+                                    1_000_000 + task["seq"] * 200_000))
         for i in range(0, len(rows), 500):
             self.db.insert("lookup_tasks", rows[i:i + 500], upsert_on="lookup_id,seq", ignore_duplicates=True)
+        reused = reuse(self.db, self.row)
         self.finish(task, 0, False)
-        print(f"  listed {p['state']}: {len(entries)} court complexes, {len(rows)} court searches", flush=True)
+        print(f"  listed {p['state']}: {len(entries)} court complexes, {len(rows)} court searches"
+              + (f", {reused} answered lately" if reused else ""), flush=True)
 
     async def district(self, ec: ECourts, task: dict) -> None:
         t, year = task["payload"], task["year"]
@@ -421,16 +563,18 @@ class Job:
         self.now_text = f"{t['name']}, {t['district']} · {year}"
         failed = False
         try:
-            res = await ec.search(t["court"], self.term, year, "Pending")
+            res = await (ec.search_advocate(t["court"], self.term) if self.advocate else ec.search(t["court"], self.term, year, "Pending"))
         except Blocked:
             raise
         except Exception as exc:  # one court failing (layout, timeout) must not stop the rest
             failed, res = True, []
             print(f"  failed {t['name']} {year}: {type(exc).__name__}: {str(exc)[:120]}", flush=True)
-        n = self.keep([{"forum": "district", "court": t["name"], "district": t["district"], "cnr": r.cnr_number, "case_number": r.case_number or None,
-                        "case_type": r.case_type or None, "year": year, "petitioner": r.petitioner, "respondent": r.respondent,
-                        "side": side_of(self.term, r.petitioner, r.respondent, r.case_type)} for r in res if r.cnr_number], t.get("state"))
-        self.finish(task, n, failed)
+        n, cnrs = self.keep([{"forum": "district", "court": t["name"], "district": t["district"], "cnr": r.cnr_number, "case_number": r.case_number or None,
+                              "case_type": r.case_type or None, "year": year_of(r.case_number) or year,
+                              **({"petitioner": r.petitioner, "respondent": r.respondent, "side": "unknown"} if self.advocate else
+                                 dict(zip(("petitioner", "respondent", "side"), placed(self.term, r.petitioner, r.respondent, r.case_type))))}
+                             for r in res if r.cnr_number], t.get("state"))
+        self.finish(task, n, failed, len(res), cnrs)
         print(f"  {t['name']} ({t['district']}) · {year}: {len(res)}", flush=True)
 
     async def high_court(self, hc: HighCourt, task: dict) -> None:
@@ -438,15 +582,17 @@ class Job:
         self.now_text = f"{t['name']} · {year}"
         failed = False
         try:
-            res = await hc.search(t["code"], t["bench"], self.term, year)
+            res = await (hc.search_advocate(t["code"], t["bench"], self.term) if self.advocate else hc.search(t["code"], t["bench"], self.term, year))
         except Exception as exc:
             failed, res = True, []
             print(f"  failed {t['name']} {year}: {type(exc).__name__}: {str(exc)[:120]}", flush=True)
-        n = self.keep([{"forum": "high_court", "court": t["name"], "district": None, "cnr": r.cnr_number,
-                        "case_number": f"{r.case_type}/{r.case_number}" if r.case_type else r.case_number, "case_type": r.case_type or None,
-                        "year": year, "petitioner": r.petitioner, "respondent": r.respondent,
-                        "side": side_of(self.term, r.petitioner, r.respondent, r.case_type)} for r in res if r.cnr_number], t.get("state"))
-        self.finish(task, n, failed)
+        n, cnrs = self.keep([{"forum": "high_court", "court": t["name"], "district": None, "cnr": r.cnr_number,
+                              "case_number": f"{r.case_type}/{r.case_number}" if r.case_type else r.case_number, "case_type": r.case_type or None,
+                              "year": year_of(r.case_number) or year,
+                              **({"petitioner": r.petitioner, "respondent": r.respondent, "side": "unknown"} if self.advocate else
+                                 dict(zip(("petitioner", "respondent", "side"), placed(self.term, r.petitioner, r.respondent, r.case_type))))}
+                             for r in res if r.cnr_number], t.get("state"))
+        self.finish(task, n, failed, len(res), cnrs)
         print(f"  {t['name']} · {year}: {len(res)}", flush=True)
 
     def consumer(self, ej: EJagriti, task: dict) -> None:
@@ -471,18 +617,39 @@ class Job:
             comp = [r.get("complainantName") or ""] + [x.get("additional_complainant_name", "") for x in r.get("additionalComplainantList") or []]
             on_r, on_c = any(is_company(n, [self.term]) for n in resp), any(is_company(n, [self.term]) for n in comp)
             if r.get("caseNumber"):
-                out.append({"forum": "consumer", "court": t["name"], "district": None, "cnr": r["caseNumber"], "case_number": r["caseNumber"],
+                out.append({"forum": "ncdrc" if t["cid"] == NCDRC else "consumer", "court": t["name"], "district": None, "cnr": r["caseNumber"], "case_number": r["caseNumber"],
                             "case_type": "Consumer complaint", "year": year_of(r["caseNumber"]) or year,
                             "petitioner": (r.get("complainantName") or "").strip(), "respondent": (r.get("respondentName") or "").strip(),
                             "side": "respondent" if on_r else "petitioner" if on_c else "unknown"})
-        n = self.keep(out, t.get("state"))
-        self.finish(task, n, failed)
+        n, cnrs = self.keep(out, t.get("state"))
+        self.finish(task, n, failed, len(rows), cnrs)
+        print(f"  {t['name']} · {year}: {len(rows)}", flush=True)
+
+    def nclt(self, nc: NCLT, task: dict) -> None:
+        t, year = task["payload"], task["year"]
+        self.now_text = f"{t['name']} · {year}"
+        failed = False
+        try:
+            rows = nc.advocate(self.term, t["bench"], year) if self.advocate else nc.party(self.term, t["bench"], year)
+        except Exception as exc:
+            failed, rows = True, []
+            print(f"  failed {t['name']} {year}: {type(exc).__name__}: {str(exc)[:120]}", flush=True)
+        out = []
+        for r in rows:
+            if not r["filing_no"]:
+                continue
+            on_p, on_r = (False, False) if self.advocate else (is_company(r["petitioner"], [self.term]), is_company(r["respondent"], [self.term]))
+            out.append({"forum": "nclt", "court": t["name"], "district": None, "cnr": f"NCLT{r['filing_no']}", "case_number": r["case_number"],
+                        "case_type": r["case_type"], "year": year, "petitioner": r["petitioner"], "respondent": r["respondent"],
+                        "side": "respondent" if on_r else "petitioner" if on_p else "unknown"})
+        n, cnrs = self.keep(out, None)
+        self.finish(task, n, failed, len(rows), cnrs)
         print(f"  {t['name']} · {year}: {len(rows)}", flush=True)
 
     async def lane(self, name: str, deadline: float) -> None:
         """Take court searches one after another until none are left, time runs out, or the search is stopped."""
         async with contextlib.AsyncExitStack() as stack:
-            ec = hc = ej = None
+            ec = hc = ej = nc = None
             while time.time() < deadline and not self.stopped and not self.blocked:
                 try:
                     task = self.claim(name)
@@ -491,6 +658,11 @@ class Job:
                     await asyncio.sleep(15)
                     continue
                 if not task:
+                    # States still being listed will add court searches: wait for them rather than leave (0.8).
+                    if self.listing():
+                        self.report()
+                        await asyncio.sleep(10)
+                        continue
                     return
                 try:
                     if task["forum"] in ("district", "index"):
@@ -499,6 +671,9 @@ class Job:
                     elif task["forum"] == "high_court":
                         hc = hc or await stack.enter_async_context(HighCourt())
                         await self.high_court(hc, task)
+                    elif task["forum"] == "nclt":
+                        nc = nc or NCLT()
+                        await asyncio.to_thread(self.nclt, nc, task)
                     else:
                         ej = ej or EJagriti()
                         await asyncio.to_thread(self.consumer, ej, task)
@@ -523,18 +698,25 @@ def finish_if_done(db: DB, row: dict) -> None:
     if row["state_code"] == "all":
         # Watching an all-India search adds only the courts where cases were found.
         summary = db._check(db.http.post("/rpc/lookup_summary", json={"lid": row["id"]})) or {}
-        progress["courts"] = len(summary.get("courts") or [])
-    if db.update("lookups", f"id=eq.{row['id']}&status=eq.running", {"status": "done", "finished_at": now(), "progress": progress}) and not held:
+        progress["courts"] = summary.get("court_count") or len(summary.get("courts") or [])
+    if db.update("lookups", f"id=eq.{row['id']}&status=eq.running", {"status": "done", "finished_at": now(), "progress": progress}, returning="id") and not held:
         # The list of court searches was only the search's to-do list (often the biggest thing in the database):
-        # once every court is done it goes, and the results and totals stay. Kept while "Load more" still needs it.
-        db.http.delete(f"/lookup_tasks?lookup_id=eq.{row['id']}")
+        # once every court is done it goes, and the results and totals stay. Kept while "Load more" still needs it,
+        # and the courts that did not answer stay for "Search them again" (retry_lookup).
+        db.http.delete(f"/lookup_tasks?lookup_id=eq.{row['id']}&failed=eq.false")
 
 
-async def work(db: DB, row: dict, worker: str, deadline: float, lanes: int = LANES) -> None:
+def lanes_for(c: dict) -> int:
+    """Court sessions per runner: 3 for small searches (a trial: eCourts blocked an address at about six), else 2."""
+    return LANES_SMALL if int(c.get("total") or 0) <= SMALL_SEARCH else LANES
+
+
+async def work(db: DB, row: dict, worker: str, deadline: float, lanes: int | None = None) -> None:
     job = Job(db, row, worker)
     job.report(force=True)
     if job.stopped:
         return
+    lanes = lanes or lanes_for(counts(db, row["id"]))
     await asyncio.gather(*(job.lane(f"lane{i + 1}", deadline) for i in range(lanes)))
     if job.stopped:
         print(f"{row['party']}: stopped from the dashboard", flush=True)
@@ -599,7 +781,7 @@ def main() -> int:
             output(id="", workers="[]")
             return 0
         open_tasks = asyncio.run(prepare(db, rows[0]))
-        k = workers_for(open_tasks)
+        k = min(workers_for(open_tasks), rows[0].get("workers") or MAX_WORKERS)  # a retry runs on fewer machines
         output(id=rows[0]["id"], workers=json.dumps(list(range(1, k + 1))))
         if not open_tasks:
             finish_if_done(db, rows[0])

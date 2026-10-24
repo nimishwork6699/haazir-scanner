@@ -1,0 +1,41 @@
+name: NCLT
+
+# Watched companies' cases at the National Company Law Tribunal (every bench): by CIN where the company has one, and
+# by name (pending cases of this year and last). New cases join Our cases; next dates of saved ones are refreshed.
+# Started by the database timer (pg_cron -> /api/cron/tick?job=nclt) or by hand. Runs only in the public repo.
+on:
+  workflow_dispatch:
+    inputs:
+      company:
+        description: "Only this company (short name); blank = every watched company"
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nclt
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    if: github.repository == 'nimishwork6699/haazir-scanner'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: scanner
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      APP_URL: ${{ vars.APP_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: scanner/requirements.txt
+      - run: pip install -r requirements.txt
+      - run: python -m haazir.nclt scan --company "${{ inputs.company }}"

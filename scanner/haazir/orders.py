@@ -67,7 +67,7 @@ async def district_proceedings(ec, db: DB, case_id: str, html: str) -> int:
             continue
         values = {**parse_business(r.get("data_list") or ""), "proceedings_fetched_at": now()}
         bdate = _ddmmyyyy(a[6])
-        updated = db.update("hearings", f"case_id=eq.{case_id}&business_date=eq.{bdate}", values)
+        updated = db.update("hearings", f"case_id=eq.{case_id}&business_date=eq.{bdate}", values, returning="id")
         if not updated:
             db.insert("hearings", {"case_id": case_id, "business_date": bdate, "hearing_date": _ddmmyyyy(a[2][6:8] + "-" + a[2][4:6] + "-" + a[2][:4]), **values},
                       upsert_on="case_id,hearing_date,business_date", ignore_duplicates=True)
@@ -93,7 +93,7 @@ def store_order(db: DB, case_id: str, pdf: bytes, order_date: str | None, label:
         return None
     doc = db.insert("documents", {"case_id": case_id, "kind": "order", "title": label, "source": "ecourts", "source_ref": source_ref,
                                   "storage_path": path, "mime": "application/pdf", "size_bytes": len(pdf), "sha256": sha,
-                                  "received_at": now(), "received_by": "Haazir", "read_status": "pending", "order_date": order_date})[0]
+                                  "received_at": now(), "received_by": "Haazir", "read_status": "pending", "order_date": order_date}, returning="id")[0]
     db.log(case_id, "document_added", {"source": "ecourts", "kind": "order", "order_date": order_date})
     return doc["id"]
 

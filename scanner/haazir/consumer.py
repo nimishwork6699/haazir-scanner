@@ -25,7 +25,7 @@ import httpx
 from .classify import categorize  # noqa: F401  (kept for parity with district cases)
 from . import places
 from .db import DB
-from .matching import is_company
+from .matching import is_company, title_of
 from .scan import refresh_suggestions
 
 BASE = "https://e-jagriti.gov.in/services"
@@ -176,7 +176,7 @@ def case_values(rec: dict, hist: list[dict], court: dict, comps: list[tuple[str,
         "petitioners": [{"name": complainant, "advocate": advocates(rec.get("complainantAdvocate"))}] if complainant else [],
         "respondents": [{"name": respondent, "advocate": advocates(rec.get("respondentAdvocate"))}] if respondent else [],
         "petitioner_advocate": advocates(rec.get("complainantAdvocate")) or None,
-        "title": f"{complainant} vs {respondent}".strip(" vs"),
+        "title": title_of(complainant, respondent),
         "company_role": side,
         "role_source": "case_page",
         "category": "consumer",
@@ -198,7 +198,7 @@ def save(db: DB, values: dict, hist: list[dict], baseline: bool) -> str:
         case_id = existing[0]["id"]
         db.update("cases", f"id=eq.{case_id}", values)
     else:
-        case_id = db.insert("cases", {**values, "is_baseline": baseline})[0]["id"]
+        case_id = db.insert("cases", {**values, "is_baseline": baseline}, returning="id")[0]["id"]
         db.log(case_id, "detected", {"forum": "consumer", "court": values["raw_search"]["commission"], "baseline": baseline})
     rows = [{"case_id": case_id, "hearing_date": _date(h["dateOfAction"]), "business_date": _date(h["dateOfAction"]),
              "purpose": h.get("actionTaken"), "judge": h.get("judgesName")} for h in hist if h.get("dateOfAction")]
@@ -296,7 +296,7 @@ def add(db: DB, ej: EJagriti, state: str, districts: list[str], state_commission
     st = next((s for s in ej.state_commissions() if s["commissionNameEn"].strip().lower() == state.lower()), None)
     if not st:
         raise SystemExit(f"state commission not found: {state}")
-    zone = db.insert("zones", {"name": zone_name, "city": zone_name.replace(" Zone", "")}, upsert_on="name")[0]
+    zone = db.insert("zones", {"name": zone_name, "city": zone_name.replace(" Zone", "")}, upsert_on="name", returning="*")[0]
     targets = []
     if state_commission:
         targets.append((st["commissionId"], f"State Commission, {st['commissionNameEn'].title()}", ("CC", "A", "FA")))
@@ -341,7 +341,7 @@ def main() -> int:
         db.update("courts", f"forum=eq.consumer&complex_name=eq.{args.commission}", {"est_codes": ",".join(args.series)})
         print("ok")
     else:
-        run = db.insert("scan_runs", {"trigger": "consumer"})[0]
+        run = db.insert("scan_runs", {"trigger": "consumer"}, returning="*")[0]
         try:
             stats = scan(db, ej, args.backfill, args.city)
             status = "ok"

@@ -13,7 +13,9 @@ What it checks, for each name x place x years x courts:
   - only the asked-for courts and years, newest year first; one district stays in that district;
   - busy complexes are split one court per establishment, so workers can share them;
   - states take turns (the first court searches cover every state), and a state not listed yet is listed first;
-  - how many workers start; cases Haazir already has appear at once; Stop is noticed; results pages load.
+  - how many workers start; cases Haazir already has appear at once; Stop is noticed; results pages load;
+  - the likeliest courts go first; a court with no case since 2020 skips older years; a repeat search within a week
+    takes the earlier answers and cases instead of asking the courts again.
 """
 
 import argparse
@@ -29,7 +31,9 @@ from .db import DB
 YEARS_ONE = [2026]
 YEARS_FEW = [2026, 2025, 2024]
 YEARS_ALL = list(range(2026, 1999, -1))
-FORUM_SETS = [["district"], ["high_court"], ["consumer"], ["district", "high_court", "consumer"]]
+FORUM_SETS = [["district"], ["high_court"], ["consumer"], ["nclt"], ["district", "high_court", "consumer", "nclt"]]
+# The name test searches that save court answers use, so a real search never reuses a practice answer.
+PRACTICE = "Haazir Practice Run Pvt Ltd"
 NAMES = ["ICICI LOMBARD", "SBI", "United India Insurance Co. Ltd.", "M/s. A.B.C. (India) Pvt. Ltd.", "Rakesh Kumar", "O'Brien & Sons"]
 
 
@@ -158,8 +162,21 @@ async def check_plans(db: DB, portals: Portals, rep: Report) -> None:
                     first = claim_order(dist)[:len(states)]
                     rep.check(len({r["payload"].get("state") for r in first}) == len(states),
                               f"{name}: states take turns ({len(states)} states in the first {len(states)} court searches)")
+                if "nclt" in forums:
+                    rep.check(len({r["payload"]["bench"] for r in rows if r["forum"] == "nclt"}) == 15, f"{name}: every NCLT bench")
+                if "consumer" in forums and not place.get("district_code"):
+                    rep.check(any(r["payload"].get("cid") == L.NCDRC for r in rows if r["forum"] == "consumer"), f"{name}: NCDRC included")
                 k = L.workers_for(len(rows))
                 rep.check(k == min(L.MAX_WORKERS, len(rows)), f"{name}: {k} workers would start")
+    # Likeliest courts first: a complex where the name was found before leads its state's district court searches.
+    row = {"id": str(uuid.uuid4()), "party": "ICICI LOMBARD", "years": YEARS_ONE, "forums": ["district"], "district_cap": 500,
+           **dict(places(portals))["one state"]}
+    courts = await L.area(db, row)
+    plain = [r for r in L.plan_rows(row, courts) if r["forum"] == "district"]
+    pick = plain[-1]["key"]
+    ranked_rows = [r for r in L.plan_rows(row, courts, {pick: (5, 5)}) if r["forum"] == "district"]
+    rep.check(L.complex_of(claim_order(ranked_rows)[0]["key"]) == L.complex_of(pick), "a court where the name was found before is searched first")
+    rep.check(all(r.get("key") for r in ranked_rows), "every court search has its court key")
     # A state whose court list is not saved yet is listed by a worker first, while the others search.
     by_name = {v: k for k, v in portals.states.items()}
     missing = by_name.get("Rajasthan")
@@ -180,7 +197,7 @@ def test_search(db: DB, **kw) -> dict:
     """A search marked as a test: status "stopped" with a fresh heartbeat, so no worker or Worker run takes it."""
     base = {"party": "ICICI LOMBARD", "state_code": "26", "state_name": "Delhi", "years": YEARS_ONE, "forums": ["district"],
             "status": "stopped", "requested_by": "Search check (test)", "progress": {"now": "Practice run, deleted when done"}}
-    return db.insert("lookups", {**base, **kw})[0]
+    return db.insert("lookups", {**base, **kw}, returning="*")[0]
 
 
 def check_names(db: DB, rep: Report, made: list[str]) -> None:
@@ -201,7 +218,7 @@ def check_names(db: DB, rep: Report, made: list[str]) -> None:
 
 def check_workers(db: DB, portals: Portals, rep: Report, made: list[str]) -> None:
     print("Workers sharing one search, progress, Stop and the results pages…", flush=True)
-    row = test_search(db)
+    row = test_search(db, party=PRACTICE)
     made.append(row["id"])
     row["district_code"], row["district_name"], row["state_codes"] = None, None, None
     rows = L.plan_rows(row, asyncio.run(L.area(db, row)))
@@ -228,6 +245,75 @@ def check_workers(db: DB, portals: Portals, rep: Report, made: list[str]) -> Non
     status = db.select("lookups", f"select=status&id=eq.{row['id']}")[0]["status"]
     rep.check(status == "done" and left.headers.get("content-range", "").endswith("/0"),
               f"a finished search is marked done and its to-do list is cleared (status {status})")
+    # Courts that did not answer stay listed after finishing, and "Search them again" queues just those.
+    row = test_search(db, party=PRACTICE)
+    made.append(row["id"])
+    row["district_code"], row["district_name"], row["state_codes"] = None, None, None
+    rows = L.plan_rows(row, asyncio.run(L.area(db, row)))[:6]
+    for r in rows:
+        r.pop("key", None)  # as an older search wrote them, without court keys
+    L.write_tasks(db, rows)
+    db.http.patch(f"/lookup_tasks?lookup_id=eq.{row['id']}", json={"done": True, "found": 0})
+    db.http.patch(f"/lookup_tasks?lookup_id=eq.{row['id']}&seq=in.(0,1)", json={"failed": True})
+    db.update("lookups", f"id=eq.{row['id']}", {"status": "running"})
+    L.finish_if_done(db, row)
+    kept = db.select("lookup_tasks", f"select=id,failed&lookup_id=eq.{row['id']}")
+    rep.check(len(kept) == 2 and all(t["failed"] for t in kept), f"a finished search keeps only its {len(kept)} failed court searches")
+    n = db._check(db.http.post("/rpc/retry_lookup", json={"lid": row["id"], "max_workers": 6}))
+    after = db.select("lookups", "select=status,workers&id=eq." + row["id"])[0]
+    keys = db.select("lookup_tasks", f"select=key&lookup_id=eq.{row['id']}")
+    rep.check(n == 2 and after["status"] == "queued" and after["workers"] == 6, f"Search them again queues {n} court searches on {after['workers']} machines")
+    rep.check(all(t["key"] for t in keys) and {t["key"] for t in keys} <= {L.task_key(r["forum"], r["payload"]) for r in rows},
+              "older court searches get the same court keys as new ones")
+    db.update("lookups", f"id=eq.{row['id']}", {"status": "stopped"})
+
+
+def check_speed(db: DB, portals: Portals, rep: Report, made: list[str]) -> None:
+    print("Older years skipped where a court has nothing since 2020; a repeat search reuses the answers…", flush=True)
+    term = L.normalise(PRACTICE)
+    db.http.delete(f"/court_answers?term=eq.{L.quote(term)}")
+    try:
+        place = dict(places(portals))["one district"]
+        a = test_search(db, party=PRACTICE, years=[2026, 2019], **{k: v for k, v in place.items() if k != "state_codes"})
+        made.append(a["id"])
+        a["state_codes"] = None
+        rows = L.plan_rows(a, asyncio.run(L.area(db, a)))
+        L.write_tasks(db, rows)
+        db.update("lookups", f"id=eq.{a['id']}", {"status": "running", "heartbeat": L.now()})
+        job = L.Job(db, a, "t1")
+        recent = [r for r in rows if r["year"] == 2026]
+        busy = recent[-1]["key"]  # last in line, so every other court's 2019 search comes up (and is skipped) first
+        cnr = "PRACTICE" + uuid.uuid4().hex[:8].upper()
+        # Every 2026 court search answered: one court returned a case, the rest nothing.
+        while (t := job.claim("lane1")) and t["year"] == 2026:
+            if t["key"] == busy:
+                n, cnrs = job.keep([{"forum": "district", "court": "Practice court", "district": place["district_name"], "cnr": cnr,
+                                     "case_number": "MACT/1/2026", "case_type": "MACT", "year": 2026, "petitioner": "A",
+                                     "respondent": PRACTICE, "side": "respondent"}], "Delhi")
+                job.finish(t, n, False, 1, cnrs)
+            else:
+                job.finish(t, 0, False, 0, [])
+        rep.check(bool(t) and t["key"] == busy and t["year"] == 2019,
+                  f"only the court with a case since 2020 is searched for 2019 (got {t and (t['key'], t['year'])})")
+        c = L.counts(db, a["id"], fresh=True)
+        rep.check(int(c.get("skipped") or 0) == len(recent) - 1, f"{c.get('skipped')} older court searches skipped, expected {len(recent) - 1}")
+        if t:
+            job.finish(t, 0, False, 0, [])
+        rep.check(job.claim("lane1") is None, "nothing left to search after that")
+        db.update("lookups", f"id=eq.{a['id']}", {"status": "stopped"})
+
+        b = test_search(db, party=PRACTICE, years=[2026, 2019], **{k: v for k, v in place.items() if k != "state_codes"})
+        made.append(b["id"])
+        b["state_codes"] = None
+        L.write_tasks(db, L.plan_rows(b, asyncio.run(L.area(db, b))))
+        n = L.reuse(db, b)
+        rep.check(n == len(recent) + 1, f"a repeat search takes {n} answers from the first (expected {len(recent) + 1}: skipped ones are asked)")
+        got = db.select("lookup_results", f"select=cnr&lookup_id=eq.{b['id']}")
+        rep.check([r["cnr"] for r in got] == [cnr], "the first search's case appears in the repeat at once")
+        c = L.counts(db, b["id"], fresh=True)
+        rep.check(int(c.get("reused") or 0) == n, f"progress shows {c.get('reused')} court searches answered lately")
+    finally:
+        db.http.delete(f"/court_answers?term=eq.{L.quote(term)}")
 
 
 def check_big_write(db: DB, portals: Portals, rep: Report, made: list[str]) -> None:
@@ -245,6 +331,67 @@ def check_big_write(db: DB, portals: Portals, rep: Report, made: list[str]) -> N
     rep.check(whole < 15 * 60, f"the biggest search's list is written in under 15 minutes (about {whole / 60:.1f})")
 
 
+# Which side a searched insurer is on when the court's list shows only its name. Case types as the courts spell
+# them (ICICI all-India search). Claims decide "respondent" by law; appeals, executions and misc matters wait for
+# the case page; both parties shown means the list's own order.
+SIDES = [
+    ("MCOP", "", "respondent"), ("M.V.C.", "", "respondent"), ("MVOP", "", "respondent"), ("OP(MV)", "", "respondent"),
+    ("OP MV", "", "respondent"), ("MACP", "", "respondent"), ("M.A.C.P.", "", "respondent"), ("MACT Main", "", "respondent"),
+    ("M A C C", "", "respondent"), ("M.a.c. Case", "", "respondent"), ("Motor Accident Claim Petition", "", "respondent"),
+    ("WC-FATAL-LC", "", "respondent"), ("W.C.F.A.Case", "", "respondent"), ("ECA", "", "respondent"),
+    ("Claim Petition", "", "respondent"), ("TS MAC", "", "respondent"),
+    ("MACP. M.A.", "", "unknown"), ("MACP. Dkst.", "", "unknown"), ("MACMA", "", "unknown"), ("MACM", "", "unknown"),
+    ("WC-MIS-LC", "", "unknown"), ("MJC MACC", "", "unknown"), ("Misc.Motor Accident Claim Misc.", "", "unknown"),
+    ("EX MJC", "", "unknown"), ("EXECUTION CLAIM", "", "unknown"), ("Sum. Darkhast", "", "unknown"), ("EP", "", "unknown"),
+    ("Appln. WCA C", "", "unknown"), ("OP", "", "unknown"), ("CS", "", "unknown"), ("MCP", "", "unknown"),
+    ("FAO", "Ram Lal", "petitioner"), ("MACA", "Ram Lal", "petitioner"), ("CS", "Ram Lal", "petitioner"),
+]
+
+
+def check_sides(rep: Report) -> None:
+    print("Sides by law when the list shows only our name…", flush=True)
+    for case_type, other, want in SIDES:
+        got = L.side_of("ICICI LOMBARD", "ICICI Lombard General Insruance Co. Ltd.", other, case_type)
+        rep.check(got == want, f"side of an insurer in '{case_type}'{' vs ' + other if other else ''}: {got}, expected {want}")
+    rep.check(L.side_of("ICICI LOMBARD", "Ram Lal", "ICICI Lombard", "MACT") == "respondent", "insurer listed as respondent")
+    rep.check(L.side_of("TATA MOTORS", "Tata Motors Ltd", "", "MACT") == "unknown", "a vehicle owner is not decided by law")
+    rep.check(L.placed("ICICI LOMBARD", "ICICI Lombard", "", "MCOP") == ("", "ICICI Lombard", "respondent"),
+              "an insurer respondent by law is shown on the respondent side")
+    rep.check(L.placed("ICICI LOMBARD", "ICICI Lombard", "", "CS") == ("ICICI Lombard", "", "unknown"), "an undecided one stays where the list put it")
+    from .matching import title_of
+    rep.check(title_of("Tata Motors", "") == "Tata Motors" and title_of("", "Ram Das") == "Ram Das" and title_of("A", "B") == "A vs B",
+              "titles keep every letter of a name")
+
+
+# Cause lists as the courts print them (shortened): Supreme Court, NCLAT, Rajasthan High Court.
+LISTS = {
+    "Supreme Court": ("CHIEF JUSTICE'S COURT\n7 Diary No. 50264-2026\nII-D\nNAND KUMAR YADAV RAMJEE PANDEY- 2376\nVersus\nSHAMSHAD AHMAD AND ANR.\n"
+                      "8 SLP(C) No.\n20017/2026\nICICI LOMBARD GENERAL INSURANCE CO LTD RAJ KUMAR- 3898\nVersus\nSUNITA DEVI\nFOR ADMISSION\n",
+                      "8", "SLP(C)/20017/2026", "petitioner"),
+    "NCLAT": ("10.  IA No. 1303/2026\n(For Condone Delay)\nin\nComp App (AT) (CH)\n(Ins) No. 460/2026\n\nRamesh Traders\nVs\nState Bank of India & Anr.\n"
+              "11.  Comp App (AT) (CH)\n(Ins) No. 489/2026\nAnil Kumar\nVs\nDr. Renuka Rani\n",
+              "10", "Comp App (AT) (CH) (Ins)/460/2026", "respondent"),
+    "Rajasthan High Court": ("154 CRL.M.(BAIL)\n16499/2026\nURN: CRLMB\n30463/2026\nAJAY S/O RAJU\nVS STATE OF RAJASTHAN\nSAMEER SHARMA-P\n"
+                             "155 C.M.A. 880/2020\nURN: CMA 1730/2020\nDEVKARAN GURJAR\nVS AMAR SINGH\nPRATEEK SHARMA-P\n"
+                             "[603-Fatal injury, permanent disability matters]\n[CLAIMANT/DC-UNITED INDIA INSURANCE CO/PD 60/KOTA]\n",
+                             "155", "C.M.A/880/2020", "respondent"),
+}
+
+
+def check_causelists(rep: Report) -> None:
+    from . import causelists as C
+    print("Cause lists: entries split at their item numbers, names matched to the right entry…", flush=True)
+    names = {"ICICI Lombard": ["icici lombard"], "State Bank": ["state bank of india"], "United India": ["united india insurance"]}
+    for court, (text, item, number, side) in LISTS.items():
+        hits = C.hits_in(text, names)
+        rep.check(len(hits) == 1, f"{court}: one entry names a watched company (found {len(hits)})")
+        if hits:
+            h = hits[0]
+            rep.check(h["item"] == item, f"{court}: the right item ({h['item']}, expected {item})")
+            rep.check(h["case_number"] == number, f"{court}: case number {h['case_number']!r}, expected {number!r}")
+            rep.check(h["side"] == side, f"{court}: side {h['side']}, expected {side}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--quick", action="store_true", help="skip the large write-speed check")
@@ -255,9 +402,12 @@ def main() -> int:
     rep, made = Report(), []
     t = time.time()
     try:
+        check_sides(rep)
+        check_causelists(rep)
         asyncio.run(check_plans(db, portals, rep))
         check_names(db, rep, made)
         check_workers(db, portals, rep, made)
+        check_speed(db, portals, rep, made)
         if not args.quick:
             check_big_write(db, portals, rep, made)
     except Exception as exc:
@@ -265,6 +415,7 @@ def main() -> int:
     finally:
         for lid in made:
             db.http.delete(f"/lookups?id=eq.{lid}")  # tasks and results go with it
+        db.http.delete(f"/court_answers?term=eq.{L.quote(L.normalise(PRACTICE))}")
     print(f"\n{rep.passed} checks passed, {len(rep.failed)} failed, in {time.time() - t:.0f} s"
           + ("" if not rep.failed else "\nFailed:\n  " + "\n  ".join(rep.failed)), flush=True)
     return 1 if rep.failed else 0

@@ -1,7 +1,8 @@
 name: Worker
 
 # Every 10 minutes, a safety net behind the dashboard's instant start: Find one case requests still waiting, and
-# searches still waiting or whose workers died get their cloud run started (lookup.yml, up to ten workers each).
+# searches still waiting or whose workers died get their cloud run started (lookup.yml, up to ten workers each),
+# then blank parties and sides are filled from case pages (haazir.fill).
 # Runs only in the public repo nimishwork6699/haazir-scanner, where Actions are free.
 on:
   schedule:
@@ -43,3 +44,8 @@ jobs:
       - name: Start waiting searches
         if: always()
         run: python -m haazir.lookup kick
+      - name: Fill blank parties and sides
+        # Reads case pages for search results whose list showed one party ("ICICI Lombard vs ___"), slowly, for at
+        # most 6 minutes, so it is done before the next Worker run starts. Stops at once if eCourts refuses.
+        if: always()
+        run: python -m haazir.fill run --minutes 6

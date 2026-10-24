@@ -104,6 +104,12 @@ def is_company(name: str, confirm: list[str]) -> bool:
     return False
 
 
+def title_of(petitioner: str | None, respondent: str | None) -> str | None:
+    """ "A vs B", or the one name the court listed. """
+    p, r = (petitioner or "").strip(), (respondent or "").strip()
+    return f"{p} vs {r}" if p and r else (p or r or None)
+
+
 def role(petitioners: list[str], respondents: list[str], confirm: list[str]) -> str:
     on_pet = any(is_company(p, confirm) for p in petitioners)
     on_resp = any(is_company(r, confirm) for r in respondents)

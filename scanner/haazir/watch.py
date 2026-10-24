@@ -19,8 +19,9 @@ from . import places
 from .classify import categorize
 from .consumer import EJagriti, case_values, save, series_of
 from .db import DB
-from .lookup import area, tasks_of
-from .matching import normalise
+from .lookup import NCDRC, area, insurer_by_law, tasks_of
+from .nclt import bench_court
+from .matching import normalise, title_of
 
 
 def now() -> str:
@@ -38,6 +39,16 @@ def rows_of(db: DB, lookup_id: str, group: str) -> list[dict]:
         off += 1000
 
 
+def ncdrc_court(db: DB) -> str:
+    """The courts row for the National Commission (made the first time an NCDRC case is saved)."""
+    rows = db.select("courts", "select=id&forum=eq.ncdrc")
+    if not rows:
+        rows = db.insert("courts", {"forum": "ncdrc", "state_code": "ncdrc", "dist_code": "ncdrc", "complex_code": str(NCDRC),
+                                    "complex_name": "National Commission (NCDRC)", "district_name": "New Delhi", "city": "New Delhi",
+                                    "active": True}, returning="id")
+    return rows[0]["id"]
+
+
 def matched_name(r: dict) -> str:
     if r["side"] == "respondent" and (r.get("respondent") or "").strip():
         return r["respondent"]
@@ -49,7 +60,7 @@ async def run_one(db: DB, w: dict) -> dict:
 
     # 1. Company and search names.
     comp = db.insert("companies", {"name": w["company_name"], "short_name": w["short_name"], "sector": w["sector"]},
-                     upsert_on="name")[0]
+                     upsert_on="name", returning="id")[0]
     picked: dict[str, list[dict]] = {g: rows_of(db, lookup["id"], g) for g in w["names"]}
     terms = []
     for group, rows in picked.items():
@@ -138,18 +149,28 @@ async def run_one(db: DB, w: dict) -> dict:
                for c in db.select("courts", "select=id,forum,complex_name,district_name,complex_code,state_code,dist_code")}
     added = 0
     new_cases = []
+    benches: dict = {}
     for r in (r for rows_ in picked.values() for r in rows_ if r["forum"] != "consumer"):
         court = by_name.get((r["forum"], r["court"], (r["district"] or "") if r["forum"] == "district" else ""))
+        if not court and r["forum"] in ("nclt", "ncdrc"):
+            cid = bench_court(db, r["court"].removeprefix("NCLT "), benches) if r["forum"] == "nclt" else ncdrc_court(db)
+            court = {"id": cid} if cid else None
         pet, resp = (r.get("petitioner") or "").strip(), (r.get("respondent") or "").strip()
+        # The side the search found, and how: by law (an insurer in a claim) or from the list's two parties.
+        side = r["side"] if r["side"] in ("respondent", "petitioner") else "unknown"
+        source = "unknown" if side == "unknown" else "by_law" if side == "respondent" and insurer_by_law(
+            lookup["party"], pet, resp, r.get("case_type") or "") and not (pet and resp) else "search_list"
+        if source == "by_law" and pet and not resp:  # rows saved before names were moved to their side
+            pet, resp = "", pet
         new_cases.append({
             "cnr": r["cnr"], "forum": r["forum"], "company_id": comp["id"], "court_id": court["id"] if court else None,
-            "case_type": r.get("case_type"), "case_number": r.get("case_number"), "title": f"{pet} vs {resp}".strip(" vs") or None,
+            "case_type": r.get("case_type"), "case_number": r.get("case_number"), "title": title_of(pet, resp),
             "petitioners": [{"name": pet, "advocate": ""}] if pet else [], "respondents": [{"name": resp, "advocate": ""}] if resp else [],
-            "company_role": "unknown", "category": categorize(r.get("case_type")), "is_baseline": True,
+            "company_role": side, "role_source": source, "category": categorize(r.get("case_type")), "is_baseline": True,
             "raw_search": {"petitioner": pet, "respondent": resp, "watch": w["id"]},
         })
     for i in range(0, len(new_cases), 500):
-        added += len(db.insert("cases", new_cases[i:i + 500], upsert_on="cnr", ignore_duplicates=True))
+        added += len(db.insert("cases", new_cases[i:i + 500], upsert_on="cnr", ignore_duplicates=True, returning="id"))
     # Consumer complaints: read each one's record, as the consumer scan does, so it lands complete.
     for r in (r for rows_ in picked.values() for r in rows_ if r["forum"] == "consumer"):
         court = by_name.get(("consumer", r["court"], ""))

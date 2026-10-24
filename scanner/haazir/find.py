@@ -15,6 +15,7 @@ import sys
 from datetime import datetime, timezone
 
 from .db import DB
+from .matching import title_of
 from .ecourts import ECourts
 from .highcourt import HighCourt
 from .classify import categorize
@@ -59,7 +60,7 @@ def case_fields(d, cnr: str) -> dict:
         "respondents": resps,
         "petitioner_advocate": (pets[0]["advocate"] or None) if pets else None,
         "acts": acts,
-        "title": f"{pets[0]['name'] if pets else ''} vs {resps[0]['name'] if resps else ''}".strip(" vs") or None,
+        "title": title_of(pets[0]['name'] if pets else '', resps[0]['name'] if resps else ''),
         "category": categorize(d.case_type, " ".join(f"{a['act']} {a['sections']}" for a in acts)),
         "hearings": [{"hearing_date": iso(h.hearing_date), "business_date": iso(h.business_date), "purpose": h.purpose or None,
                       "judge": h.judge or None} for h in d.history][-30:],
@@ -102,7 +103,7 @@ async def fetch(cnr: str) -> dict:
 
 
 def run_one(db: DB, row: dict) -> None:
-    if not db.update("case_finds", f"id=eq.{row['id']}&status=in.(queued,running)", {"status": "running"}):
+    if not db.update("case_finds", f"id=eq.{row['id']}&status=in.(queued,running)", {"status": "running"}, returning="id"):
         return
     try:
         result = asyncio.run(fetch(row["cnr"]))
