@@ -21,19 +21,19 @@ from .db import DB
 
 # First match wins, so later steps come before earlier ones.
 STEPS: list[tuple[str, re.Pattern]] = [
-    ("decided", re.compile(r"disposed|decided|judgment pronounced|dismissed|decreed|award passed", re.I)),
-    ("stayed", re.compile(r"stayed by higher court|stayed", re.I)),
+    ("decided", re.compile(r"\bdisposed\b|\bdecided\b|judgment pronounced|\bdismissed\b|\bdecreed\b|award passed", re.I)),
+    ("stayed", re.compile(r"stayed by higher court|\bstayed\b", re.I)),
     ("ex_parte", re.compile(r"ex[\s-]?parte", re.I)),
     ("not_served", re.compile(r"unserved|not served|returned unserved|notice received back", re.I)),
-    ("served", re.compile(r"notice served|summons served|served", re.I)),
+    ("served", re.compile(r"notice served|summons served|\bserved\b", re.I)),
     # District courts label one stage "Service of Summons/bailable warrant": that is summons service, not a warrant.
-    ("warrant", re.compile(r"non[\s-]?bailable warrant|nbw|warrant issued", re.I)),
+    ("warrant", re.compile(r"non[\s-]?bailable warrant|\bnbw\b|warrant issued", re.I)),
     # High Court "FOR ORDERS- DEFECT/DEFAULT CASES": the filing is waiting on defects to be cured.
-    ("defects", re.compile(r"defe?c?t cases|defcet|default cases|defects?", re.I)),
+    ("defects", re.compile(r"defe?c?t cases|defcet|default cases|\bdefects?\b", re.I)),
     ("judgment_due", re.compile(r"^\s*(orders?|judg[e]?ment)\s*$|order reserved|reserved for|judgment reserved", re.I)),
     ("final_arguments", re.compile(r"final arguments?", re.I)),
     ("evidence", re.compile(r"evidence", re.I)),
-    ("appearance", re.compile(r"appearance|written statement|reply|steps by parties|issues|admit", re.I)),
+    ("appearance", re.compile(r"appearance|written statement|\breply\b|steps by parties|\bissues\b|\badmit\b", re.I)),
     ("notice_issued", re.compile(r"awaiting service|service of (notices?|summons)|summons/bailable|issuance of process|issue notice|notice awaited|cognizance", re.I)),
 ]
 
