@@ -22,7 +22,7 @@ from urllib.parse import quote, urljoin
 import httpx
 from pypdf import PdfReader
 
-from . import telegram
+from . import config, mail, telegram
 from .db import DB
 from .matching import normalise
 
@@ -278,10 +278,12 @@ def run(db: DB, days: int, only: list[str], alert: bool) -> dict:
 
 
 def send_alerts(db: DB) -> int:
-    """New hits, one message per company and day, to the legal head's Telegram (settings ops_telegram_chat_id)."""
-    chat = next((r["value"] for r in db.select("settings", "select=value&key=eq.ops_telegram_chat_id")), None)
-    if not chat:
-        print("No legal-head Telegram set (ops_telegram_chat_id): alerts kept, not sent.", flush=True)
+    """New hits, one message per company and day, to the legal head's Telegram and email (settings ops_telegram_chat_id, ops_email)."""
+    setting = {r["key"]: r["value"] for r in db.select("settings", "select=key,value&key=in.(ops_telegram_chat_id,ops_email)")}
+    chat = setting.get("ops_telegram_chat_id")
+    to = setting.get("ops_email") if config.BREVO_API_KEY else None
+    if not chat and not to:
+        print("No legal-head Telegram or email set (ops_telegram_chat_id, ops_email): alerts kept, not sent.", flush=True)
         return 0
     rows = db.select("cause_list_hits", "select=id,forum,court,list_date,item,case_number,parties,company:companies(short_name)"
                                         f"&alerted_at=is.null&list_date=gte.{date.today().isoformat()}&order=list_date,court,item")
@@ -293,9 +295,21 @@ def send_alerts(db: DB) -> int:
         when = datetime.fromisoformat(day).strftime("%a %d %b")
         lines = [f"• {i['court']}, item {i['item']}: {i['case_number'] or ''} {i['parties'][:160]}".strip() for i in items[:15]]
         more = f"\n…and {len(items) - 15} more" if len(items) > 15 else ""
-        text = (f"<b>{html.escape(company)} in the cause lists for {when}</b>\n" + "\n".join(html.escape(x) for x in lines)
-                + more + "\n\nAs the courts published them. Check the list before acting.")
-        if telegram.send(int(chat), text):
+        heading = f"{company} in the cause lists for {when}"
+        body = "\n".join(html.escape(x) for x in lines) + more + "\n\nAs the courts published them. Check the list before acting."
+        done = False
+        if chat:
+            try:
+                done = bool(telegram.send(int(chat), f"<b>{html.escape(heading)}</b>\n{body}"))
+            except Exception as exc:
+                print("cause-list alert on Telegram failed:", exc, flush=True)
+        if to:
+            try:
+                mail.send(to, f"Haazir: {heading}", mail.card(heading, mail.from_telegram(body)))
+                done = True
+            except Exception as exc:
+                print("cause-list alert by email failed:", exc, flush=True)
+        if done:
             db.update("cause_list_hits", f"id=in.({','.join(i['id'] for i in items)})", {"alerted_at": now()})
             sent += 1
     return sent

@@ -18,6 +18,9 @@ SUPABASE_URL = env("SUPABASE_URL")
 SUPABASE_SECRET_KEY = env("SUPABASE_SECRET_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 APP_URL = os.environ.get("APP_URL", "").strip()
+BREVO_API_KEY = os.environ.get("BREVO_API_KEY", "").strip()
+# The sender verified in Brevo; when unset, the settings row email_from (kept out of this public code).
+EMAIL_FROM = os.environ.get("EMAIL_FROM", "").strip()
 
 # eCourts blocks bursts. Keep requests sequential with a gap between them.
 REQUEST_DELAY = float(os.environ.get("HAAZIR_REQUEST_DELAY", "2.5"))

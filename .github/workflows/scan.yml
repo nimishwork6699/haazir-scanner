@@ -49,6 +49,7 @@ jobs:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      BREVO_API_KEY: ${{ secrets.BREVO_API_KEY }}
       APP_URL: ${{ vars.APP_URL || 'https://haazir-pi.vercel.app' }}
     steps:
       - uses: actions/checkout@v4
