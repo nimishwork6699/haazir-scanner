@@ -38,10 +38,19 @@ def sender() -> str:
     return found
 
 
-def send(to: str, subject: str, body_html: str, name: str | None = None) -> None:
-    """Send one mail. Raises on failure."""
+@cache
+def on() -> bool:
+    """The one switch for all email: the settings row email_on = "yes" (and a key). Off until clients use Haazir."""
     if not config.BREVO_API_KEY:
-        raise RuntimeError("BREVO_API_KEY is not set")
+        return False
+    from .db import DB
+    return next((r["value"] for r in DB().select("settings", "select=value&key=eq.email_on")), None) == "yes"
+
+
+def send(to: str, subject: str, body_html: str, name: str | None = None) -> None:
+    """Send one mail. Raises on failure or when email is switched off (callers check on() first)."""
+    if not on():
+        raise RuntimeError("Email is switched off")
     r = httpx.post("https://api.brevo.com/v3/smtp/email", timeout=30,
                    headers={"api-key": config.BREVO_API_KEY, "accept": "application/json"},
                    json={"sender": {"name": "Haazir", "email": sender()},

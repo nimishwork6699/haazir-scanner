@@ -22,7 +22,7 @@ from urllib.parse import quote, urljoin
 import httpx
 from pypdf import PdfReader
 
-from . import config, mail, telegram
+from . import mail, telegram
 from .db import DB
 from .matching import normalise
 
@@ -281,7 +281,7 @@ def send_alerts(db: DB) -> int:
     """New hits, one message per company and day, to the legal head's Telegram and email (settings ops_telegram_chat_id, ops_email)."""
     setting = {r["key"]: r["value"] for r in db.select("settings", "select=key,value&key=in.(ops_telegram_chat_id,ops_email)")}
     chat = setting.get("ops_telegram_chat_id")
-    to = setting.get("ops_email") if config.BREVO_API_KEY else None
+    to = setting.get("ops_email") if mail.on() else None
     if not chat and not to:
         print("No legal-head Telegram or email set (ops_telegram_chat_id, ops_email): alerts kept, not sent.", flush=True)
         return 0

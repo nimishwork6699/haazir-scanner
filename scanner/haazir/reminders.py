@@ -37,7 +37,7 @@ def link(case_id: str) -> str:
 
 def channel(adv: dict) -> str | None:
     """Telegram when linked (it has buttons), else email when known, else nothing."""
-    return "telegram" if adv.get("telegram_chat_id") else "email" if adv.get("email") and config.BREVO_API_KEY else None
+    return "telegram" if adv.get("telegram_chat_id") else "email" if adv.get("email") and mail.on() else None
 
 
 def claim(db: DB, case_id: str, advocate_id: str | None, kind: str, ref_date: str, via: str = "telegram") -> dict | None:
@@ -149,7 +149,7 @@ def main() -> int:
     # 4) Daily summary for the legal team, on Telegram and by email (whichever are set).
     setting = {r["key"]: r["value"] for r in db.select("settings", "select=key,value&key=in.(ops_telegram_chat_id,ops_email,ops_digest_date)")}
     ops = setting.get("ops_telegram_chat_id")
-    ops_email = setting.get("ops_email") if config.BREVO_API_KEY else None
+    ops_email = setting.get("ops_email") if mail.on() else None
     if (ops or ops_email) and setting.get("ops_digest_date") != today.isoformat():
         hearings = db.select("cases", f"select=id&next_hearing_date=eq.{today.isoformat()}&status=not.in.(disposed,not_ours)"
                                       f"&company_role=eq.respondent")
