@@ -189,15 +189,38 @@ def snippet(lines: list[str], names: list[str]) -> str:
     return head
 
 
+ADVOCATE_DETAILS = re.compile(r"other details of advocates|@[a-z0-9-]+\.[a-z]{2,}", re.I)
+
+
+def blocks(lines: list[str]) -> list[list[str]]:
+    """An item can hold several cases (connected matters, "WITH ..."): a new block starts at a line naming another
+    case number once the current case's "Versus" has passed. The advocates' contact block names parties and banks
+    in passing, so the text from it on is left out."""
+    out: list[list[str]] = [[]]
+    seen_vs = False
+    for line in lines:
+        if ADVOCATE_DETAILS.search(line):
+            break
+        if seen_vs and CASE_NO.search(line) and not VERSUS.search(line):
+            out.append([])
+            seen_vs = False
+        out[-1].append(line)
+        if VERSUS.search(line):
+            seen_vs = True
+    return [b for b in out if b]
+
+
 def hits_in(text: str, companies: dict[str, list[str]]) -> list[dict]:
+    """Each case in the list that names a watched company, with that case's own number and side."""
     out = []
     for e in entries(text):
-        flat = normalise(" ".join(e["lines"]))
-        for cid, names in companies.items():
-            if named(flat, names):
-                out.append({"company_id": cid, "item": e["item"], "court_line": e["court"], "case_number": case_number_of(e["lines"]),
-                            "parties": snippet(e["lines"], names)[:600], "side": side_in(e["lines"], names),
-                            "term": next((n for n in names if named(flat, [n])), names[0])})
+        for lines in blocks(e["lines"]):
+            flat = normalise(" ".join(lines))
+            for cid, names in companies.items():
+                if named(flat, names):
+                    out.append({"company_id": cid, "item": e["item"], "court_line": e["court"], "case_number": case_number_of(lines),
+                                "parties": snippet(lines, names)[:600], "side": side_in(lines, names),
+                                "term": next((n for n in names if named(flat, [n])), names[0])})
     return out
 
 
