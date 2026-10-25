@@ -71,6 +71,20 @@ def main() -> int:
         for h in db.select("hearings", f"select=case_id,business_date,next_purpose&case_id=in.({','.join(ids[i:i + 100])})"
                                        "&business_date=not.is.null&next_purpose=not.is.null&order=business_date.desc"):
             purpose.setdefault(h["case_id"], h["next_purpose"])
+    lines = message(cases, purpose, day)
+    for part in chunks(lines):
+        telegram.send(int(ops), part)
+    db.insert("settings", {"key": "causelist_date", "value": day}, upsert_on="key")
+    print(f"causelist: {day} sent, {len(cases)} hearings, {sum(1 for c in cases if not c.get('advocate'))} without a lawyer")
+    return 0
+
+
+# Hearings written out one by one; past this, the rest are counted court by court. With tens of thousands of cases
+# a day can have 150+ hearings, which was 7 or 8 Telegram messages every evening.
+SHOW = 30
+
+
+def message(cases: list[dict], purpose: dict[str, str], day: str) -> list[str]:
     by_court: dict[str, list[dict]] = defaultdict(list)
     for c in cases:
         by_court[(c.get("court") or {}).get("complex_name") or "Court not known"].append(c)
@@ -79,22 +93,33 @@ def main() -> int:
     lines = [f"<b>Haazir · cause list for {when}</b>",
              f"{len(cases)} hearing{'s' if len(cases) != 1 else ''}" + (f" · <b>{nobody} with no lawyer</b>" if nobody else " · all have a lawyer")]
     # Courts with an unmanned case first.
+    shown, rest = 0, []
     for court, rows in sorted(by_court.items(), key=lambda kv: (-sum(1 for c in kv[1] if not c.get("advocate")), kv[0])):
+        rows = sorted(rows, key=lambda c: bool(c.get("advocate")))
+        if shown >= SHOW:
+            rest.append((court, rows))
+            continue
+        if shown + len(rows) > SHOW:  # a big court: the first ones written out, the others counted below
+            rows, later = rows[:SHOW - shown], rows[SHOW - shown:]
+            rest.append((court, later))
         lines.append(f"\n<b>{html.escape(court.title())}</b>")
-        for c in sorted(rows, key=lambda c: bool(c.get("advocate"))):
+        for c in rows:
             who = html.escape(c["advocate"]["name"]) if c.get("advocate") else "❗ NO LAWYER"
             side = "vs us" if c["company_role"] == "respondent" else "by us"
             lines.append(f"• {html.escape((c.get('title') or '')[:55])} ({side}, {html.escape((c.get('company') or {}).get('short_name', ''))})\n"
                          f"  {who} · {html.escape(action(purpose.get(c['id']) or c.get('stage'), c['company_role']))}")
+            shown += 1
+    if rest:
+        more = sum(len(rows) for _, rows in rest)
+        lines.append(f"\n<b>And {more} more hearing{'s' if more != 1 else ''} in {len(rest)} court{'s' if len(rest) != 1 else ''}</b>")
+        for court, rows in rest:
+            free = sum(1 for c in rows if not c.get("advocate"))
+            lines.append(f"• {html.escape(court.title())}: {len(rows)}" + (f", {free} with no lawyer" if free else ""))
     if not cases:
         lines.append("\nNo hearings listed for tomorrow.")
     if config.APP_URL:
         lines.append(f"\n<a href=\"{config.APP_URL}/hearings?side=all\">Open the cause list</a>")
-    for part in chunks(lines):
-        telegram.send(int(ops), part)
-    db.insert("settings", {"key": "causelist_date", "value": day}, upsert_on="key")
-    print(f"causelist: {day} sent, {len(cases)} hearings, {nobody} without a lawyer")
-    return 0
+    return lines
 
 
 if __name__ == "__main__":

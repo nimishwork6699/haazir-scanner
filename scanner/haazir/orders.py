@@ -143,6 +143,19 @@ async def high_court_orders(hc, db: DB, case_id: str, orders) -> list[str]:
     return ids
 
 
+_secret: str | None = None
+
+
+def _auth() -> dict:
+    """The website's job routes refuse callers who are not signed in, unless they show the secret kept in settings
+    (tick_secret, the one the timers send)."""
+    global _secret
+    if _secret is None:
+        rows = DB().select("settings", "select=value&key=eq.tick_secret")
+        _secret = rows[0]["value"] if rows else ""
+    return {"Authorization": f"Bearer {_secret}"} if _secret else {}
+
+
 def read_with_ai(doc_ids: list[str], limit: int = 20) -> int:
     """Ask the dashboard to read new orders now (Gemini). The rest are read when someone opens the case."""
     if not config.APP_URL:
@@ -150,7 +163,7 @@ def read_with_ai(doc_ids: list[str], limit: int = 20) -> int:
     n = 0
     for doc in doc_ids[:limit]:
         try:
-            r = httpx.post(f"{config.APP_URL.rstrip('/')}/api/documents/{doc}/read", timeout=120)
+            r = httpx.post(f"{config.APP_URL.rstrip('/')}/api/documents/{doc}/read", headers=_auth(), timeout=120)
             n += r.status_code < 300
         except httpx.HTTPError:
             pass
@@ -163,7 +176,7 @@ def analyse_orders(limit: int = 15) -> dict:
     if not config.APP_URL:
         return {}
     try:
-        r = httpx.post(f"{config.APP_URL.rstrip('/')}/api/orders/read", json={"limit": limit}, timeout=320)
+        r = httpx.post(f"{config.APP_URL.rstrip('/')}/api/orders/read", json={"limit": limit}, headers=_auth(), timeout=320)
         return r.json() if r.status_code < 300 else {"error": r.status_code}
     except httpx.HTTPError as exc:
         return {"error": str(exc)[:120]}
@@ -173,6 +186,6 @@ def refresh_deadlines() -> None:
     """Ask the dashboard to recompute deadlines after a scan changed dates, stages or orders."""
     if config.APP_URL:
         try:
-            httpx.post(f"{config.APP_URL.rstrip('/')}/api/deadlines/refresh", json={}, timeout=90)
+            httpx.post(f"{config.APP_URL.rstrip('/')}/api/deadlines/refresh", json={}, headers=_auth(), timeout=90)
         except httpx.HTTPError:
             pass

@@ -392,6 +392,23 @@ def check_causelists(rep: Report) -> None:
             rep.check(h["side"] == side, f"{court}: side {h['side']}, expected {side}")
 
 
+def check_evening_list(rep: Report) -> None:
+    """The 7 pm Telegram cause list (haazir.causelist): at most 30 hearings written out, every other one counted by court."""
+    import re
+    from . import causelist as C
+    print("Evening cause list: short on busy days, every hearing listed or counted…", flush=True)
+    court = lambda i: {"complex_name": f"Court {i % 7}"}
+    for n in (0, 5, 30, 31, 250):
+        cases = [{"id": str(i), "title": f"Party {i} vs Company", "company_role": "respondent", "stage": "Arguments", "court": court(i),
+                  "company": {"short_name": "Co"}, "advocate": {"name": "Lawyer"} if i % 3 else None} for i in range(n)]
+        lines = C.message(cases, {}, "2026-10-26")
+        parts = C.chunks(lines)
+        listed = sum(1 for ln in lines if ln.startswith("• ") and "\n  " in ln)
+        counted = sum(int(m.group(1)) for m in re.finditer(r"^• .*?: (\d+)", "".join(parts), re.M))
+        rep.check(listed == min(n, C.SHOW) and listed + counted == n, f"{n} hearings: {listed} written out + {counted} counted")
+        rep.check(len(parts) <= 2 and all(len(x) <= 4096 for x in parts), f"{n} hearings fit in {len(parts)} Telegram message(s)")
+
+
 def check_tribunals(rep: Report) -> None:
     """NCLAT, CAT and APTEL rows (haazir.tribunals): dates, parties, which cases are live, applications, sides."""
     from datetime import date, timedelta
@@ -431,6 +448,7 @@ def main() -> int:
     try:
         check_sides(rep)
         check_causelists(rep)
+        check_evening_list(rep)
         check_tribunals(rep)
         asyncio.run(check_plans(db, portals, rep))
         check_names(db, rep, made)
