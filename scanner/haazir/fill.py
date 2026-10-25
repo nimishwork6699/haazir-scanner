@@ -92,7 +92,7 @@ def rules(db: DB, apply: bool) -> None:
     # Our cases saved from a search without their side.
     confirm = confirm_terms(db)
     cases = db.select("cases", "select=id,company_id,case_type,raw_search,company_role&company_role=eq.unknown"
-                               "&role_source=eq.unknown&status=neq.not_ours")
+                               "&role_source=eq.unknown&status=neq.not_ours&entry=eq.court")
     groups = defaultdict(list)
     log = []
     for c in cases:

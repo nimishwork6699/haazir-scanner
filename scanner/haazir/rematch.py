@@ -33,7 +33,7 @@ def main() -> int:
     for t in db.select("watch_terms", "select=company_id,confirm"):
         confirm.setdefault(t["company_id"], []).extend(t["confirm"])
     cases = db.select("cases", "select=id,cnr,company_id,case_type,category,status,company_role,role_source,"
-                               "petitioners,respondents,raw_search&detail_fetched_at=not.is.null")
+                               "petitioners,respondents,raw_search&detail_fetched_at=not.is.null&entry=eq.court")  # hand-added: a person decided
     changes = Counter()
     for c in cases:
         side, source, not_ours = decide(c, confirm[c["company_id"]])

@@ -392,6 +392,33 @@ def check_causelists(rep: Report) -> None:
             rep.check(h["side"] == side, f"{court}: side {h['side']}, expected {side}")
 
 
+def check_tribunals(rep: Report) -> None:
+    """NCLAT, CAT and APTEL rows (haazir.tribunals): dates, parties, which cases are live, applications, sides."""
+    from datetime import date, timedelta
+    from . import tribunals as T
+    print("Tribunals: dates read, parties split, live cases only, applications skipped, sides…", flush=True)
+    rep.check(T.iso("24/02/2016") == "2016-02-24" and T.iso("17-01-2025") == "2025-01-17" and T.iso("2025-01-17") == "2025-01-17", "dates in the three tribunals' ways")
+    rep.check(T.iso("N/A") is None and T.iso("") is None and T.iso(None) is None, "N/A and empty are no date")
+    rep.check(T.split_title("M/S INNOVATIVE INDUSTRIES LTD. VS M/S ICICI BANK LTD.") == ("M/S INNOVATIVE INDUSTRIES LTD.", "M/S ICICI BANK LTD."), "NCLAT 'A VS B' split")
+    rep.check(T.split_title("NTPC Limited Vs Central Electricity Regulatory Commission & Ors.")[1].startswith("Central Electricity"), "APTEL 'A Vs B' split")
+    rep.check(T.text("Avani Towers Private Limited &#40;through its RP&#41;") == "Avani Towers Private Limited (through its RP)", "&#40; read as a bracket")
+    today = date.today()
+    ago = lambda days: (today - timedelta(days=days)).isoformat()
+    rep.check(T.live({"pending": True, "next_date": (today + timedelta(days=5)).isoformat()}), "live: next date ahead")
+    rep.check(T.live({"pending": True, "last_listed": ago(200)}), "live: heard in the last 2 years")
+    rep.check(T.live({"pending": True, "filed": ago(400)}), "live: filed in the last 3 years")
+    rep.check(not T.live({"pending": True, "filed": "2017-02-07"}), "not live: 'pending' since 2017, never heard")
+    rep.check(not T.live({"pending": False, "next_date": (today + timedelta(days=5)).isoformat()}), "not live: disposed")
+    rep.check(T.is_application({"case_number": "IA 6934/ND/2026"}) and T.is_application({"case_number": "M.A./389/2022"}), "IA and M.A. are applications")
+    rep.check(not T.is_application({"case_number": "Company Appeal(AT)(Ins) 1903/ND/2026"}) and not T.is_application({"case_number": "O.A./143/2016"}), "appeals and O.A. are cases")
+    names = ["state bank of india"]
+    rep.check(T.side_for({"petitioner": "Kalarithara Michael Sebastine", "respondent": "STATE BANK OF INDIA"}, names) == "respondent", "side: against the company")
+    rep.check(T.side_for({"petitioner": "State Bank of India.", "respondent": "Adhunik Steels Ltd."}, names) == "petitioner", "side: filed by the company")
+    row = T.case_row("cat", {"filing_no": "250810009652026", "case_number": "O.A./680/2026", "case_type": "O.A.", "bench": "Jaipur", "petitioner": "KANTA DEVI",
+                             "respondent": "NORTH WESTERN RAILWAY", "filed": "2026-07-09", "next_date": None, "disposed": None, "pending": True}, "co", "respondent", None)
+    rep.check(row["cnr"] == "CAT250810009652026" and row["forum"] == "cat" and row["category"] == "service", "CAT case saved with its own id and type")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--quick", action="store_true", help="skip the large write-speed check")
@@ -404,6 +431,7 @@ def main() -> int:
     try:
         check_sides(rep)
         check_causelists(rep)
+        check_tribunals(rep)
         asyncio.run(check_plans(db, portals, rep))
         check_names(db, rep, made)
         check_workers(db, portals, rep, made)
