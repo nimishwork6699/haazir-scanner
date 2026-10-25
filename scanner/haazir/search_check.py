@@ -409,6 +409,16 @@ def check_evening_list(rep: Report) -> None:
         rep.check(len(parts) <= 2 and all(len(x) <= 4096 for x in parts), f"{n} hearings fit in {len(parts)} Telegram message(s)")
 
 
+def check_library(rep: Report) -> None:
+    """The judgment library's reader (haazir.library): acts and sections read from real headnote styles."""
+    from .library import tag
+    from .library_check import CASES
+    print("Library: acts and sections read from Supreme Court headnotes…", flush=True)
+    for text, acts, must, never in CASES:
+        a, s = tag(text)
+        rep.check(a == acts and all(x in s for x in must) and not any(x in s or x in a for x in never), f"headnote: {text[:60]}")
+
+
 def check_tribunals(rep: Report) -> None:
     """NCLAT, CAT and APTEL rows (haazir.tribunals): dates, parties, which cases are live, applications, sides."""
     from datetime import date, timedelta
@@ -450,6 +460,7 @@ def main() -> int:
         check_causelists(rep)
         check_evening_list(rep)
         check_tribunals(rep)
+        check_library(rep)
         asyncio.run(check_plans(db, portals, rep))
         check_names(db, rep, made)
         check_workers(db, portals, rep, made)
