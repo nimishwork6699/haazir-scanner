@@ -124,8 +124,8 @@ def out_prefix(ds: str, key: str) -> str:
         m = re.search(r"court=([^/]+)/bench=([^/]+)/", key)
         return f"library/fulltext/hc/{y}/{m.group(1)}_{m.group(2)}_{_stem(key)}"
     m = re.search(r"state=([^/]+)/district=([^/]+)/complex=([^/]+)/", key)
-    if ds == "dc":
-        return f"library/fulltext/dc/{y}/{m.group(1)}_{m.group(2)}_{m.group(3)}_{_stem(key)}"
+    if ds == "dc":   # "all": every order, final and interim (the first load, 26 Oct, kept final judgments only)
+        return f"library/fulltext/dc/{y}/all_{m.group(1)}_{m.group(2)}_{m.group(3)}_{_stem(key)}"
     return f"library/district/{y}/{m.group(1)}"   # district: the unit is a state's year, the key one of its bundles
 
 
@@ -240,8 +240,9 @@ def _texts(items, workers: int):
             yield f.result()
 
 
-def _finals(bucket: str, data_key: str) -> dict[str, dict]:
-    """A district complex's final judgments, by PDF file name ('orders_2022_203700000012018_1.pdf'), from its case records."""
+def _orders(bucket: str, data_key: str) -> dict[str, dict]:
+    """A district complex's orders, final and interim, by PDF file name ('orders_2022_203700000012018_1.pdf'), with their
+    case details, from its case records."""
     folder = data_key.rsplit("/", 1)[0].replace("data/tar/", "metadata/tar/", 1) + "/"
     out = {}
     for k, _ in s3_keys(bucket, folder):
@@ -252,11 +253,11 @@ def _finals(bucket: str, data_key: str) -> dict[str, dict]:
                 d = json.loads(raw)
             except ValueError:
                 continue
-            h, cs = d.get("history") or {}, d.get("case_summary") or {}
-            for o in (d.get("orders") or {}).get("final_orders") or []:
+            h, cs, orders = d.get("history") or {}, d.get("case_summary") or {}, d.get("orders") or {}
+            for final, o in [(True, o) for o in orders.get("final_orders") or []] + [(False, o) for o in orders.get("interim_orders") or []]:
                 fn = (o.get("pdf_filename") or "").strip("/")
                 if fn:
-                    out[fn.replace("/", "_")] = {"cnr": h.get("cino") or cs.get("cino"), "order_date": o.get("order_date"),
+                    out[fn.replace("/", "_")] = {"final": final, "cnr": h.get("cino") or cs.get("cino"), "order_date": o.get("order_date"),
                                                  "order_type": o.get("order_type"), "case": f"{h.get('type_name') or cs.get('case_type') or ''} {h.get('reg_no') or cs.get('case_number') or ''}/{h.get('reg_year') or cs.get('reg_year') or ''}".strip(),
                                                  "petitioner": h.get("pet_name"), "respondent": h.get("res_name"), "disposal": h.get("disp_name")}
     return out
@@ -268,18 +269,14 @@ def run_fulltext(ds: str, key: str, workers: int) -> tuple[int, int]:
     item = {"sc": 26 if "/regional/" in key else 15, "hc": 16, "dc": 17}[ds]
     court = "sc" if ds == "sc" else re.search(r"(?:court|state)=([^/]+)/", key).group(1)
     w = Writer(drive, out_prefix(ds, key), ds, item, title=f"{ds.upper()} {court} {y} full text", court=court, year=y)
-    finals = _finals(bucket, key) if ds == "dc" else None
+    orders = _orders(bucket, key) if ds == "dc" else {}
 
     def items():
         for name, data in _members(f"{bucket}/{key}"):
             if not name.lower().endswith(".pdf"):
                 continue
-            if finals is not None:
-                if name not in finals:
-                    continue        # district: final judgments only (item 17), not interim orders
-                yield name, data, finals[name]
-            else:
-                yield name, data, {}
+            # District: every order; marked final or interim where the case record says, unmarked if no record lists it.
+            yield name, data, orders.get(name, {})
 
     scans = 0
     for name, text, extra in _texts(items(), workers):
@@ -291,7 +288,7 @@ def run_fulltext(ds: str, key: str, workers: int) -> tuple[int, int]:
         if len(text) < SCAN:
             row["scan"] = True
             scans += 1
-        w.add({**row, **{k: v for k, v in extra.items() if v}})
+        w.add({**row, **{k: v for k, v in extra.items() if v not in (None, "")}})
     return w.finish(db), scans
 
 
