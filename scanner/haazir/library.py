@@ -308,6 +308,134 @@ def load_acts(only: list[str] | None = None) -> None:
             time.sleep(1)
 
 
+# ---------------------------------------------------------------- summaries as files (items 12 and 13, Backblaze)
+
+HC_BUCKET = "https://indian-high-court-judgments.s3.amazonaws.com"
+HC_SOURCE = "High Courts of India, from their judgment records (AWS Open Data copy, CC BY 4.0)"
+
+
+def sc_to_files() -> None:
+    """Item 12: the Supreme Court summaries (read from the court's records into Supabase by `judgments`) written to
+    Backblaze: one file per year, one file with all of them (the website searches it in memory), and a section index."""
+    from .storage import B2, pack
+    db, b2 = DB(), B2()
+    rows = db.select("judgments", "select=path,year,nc,citation,title,petitioner,respondent,judges,author,decided,case_no,disposal,bench,headnote,acts,sections,cnr&order=path")
+    by_year: dict[int, list] = {}
+    for r in rows:
+        r = {k: v for k, v in r.items() if v not in (None, [], "")}
+        r["court"] = "sc"
+        by_year.setdefault(r.get("year") or 0, []).append(r)
+    for y, rs in sorted(by_year.items()):
+        data = pack(rs)
+        path = f"judgments/sc/{y}.jsonl.gz"
+        b2.put(path, data, "application/gzip")
+        _record(db, path, "judgments", 12, data, title=f"Supreme Court {y}", court="sc", year=y, rows=len(rs), source=SOURCE)
+    everything = pack([r for rs in by_year.values() for r in rs])
+    b2.put("judgments/sc/all.jsonl.gz", everything, "application/gzip")
+    _record(db, "judgments/sc/all.jsonl.gz", "judgments", 12, everything, title="Supreme Court, all years", court="sc", rows=len(rows), source=SOURCE)
+    index: dict[str, list] = {}
+    for r in rows:
+        for s in r.get("sections") or []:
+            index.setdefault(s, []).append(r["path"])
+    data = pack([{"section": s, "judgments": ids} for s, ids in sorted(index.items())])
+    b2.put("judgments/sc/sections.jsonl.gz", data, "application/gzip")
+    _record(db, "judgments/sc/sections.jsonl.gz", "judgment_index", 12, data, title="Supreme Court: judgments by section", court="sc", rows=len(index), source=SOURCE)
+    print(f"Supreme Court: {len(rows):,} summaries in {len(by_year)} year files ({len(everything) / 1e6:.1f} MB all), {len(index):,} sections indexed", flush=True)
+
+
+def _record(db: DB, path: str, kind: str, item: int, data: bytes, **kw) -> None:
+    db.insert("library_files", {"path": path, "store": "b2", "kind": kind, "item": item, "bytes": len(data),
+                                "updated_at": datetime.now(timezone.utc).isoformat(), **kw}, upsert_on="path")
+
+
+def _hc_row(raw: dict, name: str, court: str, bench: str) -> dict | None:
+    soup = BeautifulSoup(raw.get("raw_html") or "", "html.parser")
+    text = clean(soup.get_text(" | "))
+    parts = [clean(p) for p in text.split("|") if clean(p)]
+    if not parts:
+        return None
+    first = parts[0]
+    m = re.match(r"(.+?)\s+of\s+(.+?)\s+Vs\.?\s+(.+)$", first)
+    facts = {}
+    labels = ("CNR", "Date of registration", "Decision Date", "Disposal Nature")
+    for i, p in enumerate(parts[:-1]):
+        nxt = parts[i + 1]
+        # A label with no value is followed straight by the next label ("Disposal Nature : | Court : …").
+        if p.rstrip(" :") in labels and not nxt.startswith(("Court :", "Judge")) and nxt.rstrip(" :") not in labels:
+            facts[p.rstrip(" :")] = nxt
+    judge = next((p.split(":", 1)[1].strip() for p in parts if p.startswith("Judge")), None)
+    court_part = next((p for p in parts if p.startswith("Court :")), "")
+    snippet = next((p for p in parts[1:] if len(p) > 60 and not p.startswith(("Judge", "Court :"))), None)
+    stem = (raw.get("pdf_link") or "").rsplit("/", 1)[-1].removesuffix(".pdf")
+    return {"id": stem, "court": court, "court_name": name or court_part.removeprefix("Court :").strip() or None, "bench": bench,
+            "case_no": m.group(1).strip() if m else first[:120], "petitioner": m.group(2).strip() if m else None,
+            "respondent": m.group(3).strip() if m else None, "judges": judge, "cnr": facts.get("CNR"),
+            "registered": iso(facts.get("Date of registration")), "decided": iso(facts.get("Decision Date")),
+            "disposal": facts.get("Disposal Nature"), "snippet": snippet[:500] if snippet else None, "pdf": raw.get("pdf_link")}
+
+
+def hc_keys(year: int) -> list[str]:
+    """The High Court record files for a year (one per court bench; some benches split into parts)."""
+    import xml.etree.ElementTree as ET
+    ns = "{http://s3.amazonaws.com/doc/2006-03-01/}"
+    out, token = [], None
+    with httpx.Client(timeout=120) as c:
+        while True:
+            params = {"list-type": "2", "prefix": f"metadata/tar/year={year}/", "max-keys": "1000"}
+            if token:
+                params["continuation-token"] = token
+            root = ET.fromstring(c.get(f"{HC_BUCKET}/", params=params).content)
+            out += [k.find(f"{ns}Key").text for k in root.findall(f"{ns}Contents")]
+            if root.find(f"{ns}IsTruncated").text != "true":
+                return [k for k in out if re.search(r"\.tar(\.gz)?$", k) and "part-mobile" not in k] or [k for k in out if k.endswith(".tar")]
+
+
+def hc_to_files(years: list[int], dry: bool = False) -> None:
+    """Item 13: summaries of every High Court judgment and order in the public copy, one file per court per year."""
+    from .storage import B2, pack
+    db, b2 = DB(), B2()
+    for year in years:
+        by_court: dict[str, list] = {}
+        names: dict[str, str] = {}
+        with httpx.Client(timeout=600) as c:
+            for key in hc_keys(year):
+                m = re.search(r"court=([\d_]+)/bench=([^/]+)/", key)
+                if not m:
+                    continue
+                court, bench = m.group(1), m.group(2)
+                r = c.get(f"{HC_BUCKET}/{key}")
+                if r.status_code != 200:
+                    print(f"  {year} {key}: {r.status_code}", flush=True)
+                    continue
+                mode = "r:gz" if key.endswith(".gz") else "r:"
+                try:
+                    with tarfile.open(fileobj=io.BytesIO(r.content), mode=mode) as t:
+                        for mem in t.getmembers():
+                            if not mem.isfile() or not mem.name.endswith(".json"):
+                                continue
+                            raw = json.load(t.extractfile(mem))
+                            row = _hc_row(raw, raw.get("court_name") or "", court, bench)
+                            if row:
+                                by_court.setdefault(court, []).append(row)
+                                names[court] = row["court_name"] or names.get(court, court)
+                except tarfile.TarError as exc:
+                    print(f"  {year} {key}: {exc}", flush=True)
+        total = 0
+        for court, rows in by_court.items():
+            seen, uniq = set(), []
+            for row in rows:  # a bench split into parts can repeat a record
+                if row["id"] not in seen:
+                    seen.add(row["id"]); uniq.append(row)
+            total += len(uniq)
+            if dry:
+                continue
+            data = pack(uniq)
+            path = f"judgments/hc/{court}/{year}.jsonl.gz"
+            b2.put(path, data, "application/gzip")
+            _record(db, path, "judgments", 13, data, title=f"{names.get(court, court)} {year}", court=court, year=year, rows=len(uniq), source=HC_SOURCE)
+        print(f"{year}: {total:,} High Court judgments and orders in {len(by_court)} courts", flush=True)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -318,11 +446,20 @@ def main() -> int:
     s.add_argument("year", type=int)
     b = sub.add_parser("acts")
     b.add_argument("only", nargs="*", help="short names, e.g. \"MV Act\" CPC (all when none)")
+    sub.add_parser("sc-files")
+    h = sub.add_parser("hc-files")
+    h.add_argument("first", type=int)
+    h.add_argument("last", type=int, nargs="?")
+    h.add_argument("--dry", action="store_true")
     a = ap.parse_args()
     if a.cmd == "judgments":
         load(a.first, a.last or a.first)
     elif a.cmd == "acts":
         load_acts(a.only or None)
+    elif a.cmd == "sc-files":
+        sc_to_files()
+    elif a.cmd == "hc-files":
+        hc_to_files(list(range(a.first, (a.last or a.first) + 1)), a.dry)
     else:
         with httpx.Client(follow_redirects=True) as client:
             rows = year_rows(client, a.year)

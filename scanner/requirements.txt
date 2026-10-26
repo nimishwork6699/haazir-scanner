@@ -3,3 +3,5 @@ httpx
 rapidfuzz
 python-dotenv
 pypdf
+psycopg[binary]
+beautifulsoup4
