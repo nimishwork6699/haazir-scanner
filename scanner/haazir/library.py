@@ -397,12 +397,32 @@ def hc_to_files(years: list[int], dry: bool = False) -> None:
     for year in years:
         by_court: dict[str, list] = {}
         names: dict[str, str] = {}
+        total, courts = 0, 0
+
+        def flush(court: str) -> None:
+            """A court's year written as soon as its benches are read (the list comes court by court), so a busy year
+            is never held in memory all at once."""
+            nonlocal total, courts
+            seen, uniq = set(), []
+            for row in by_court.pop(court, []):  # a bench split into parts can repeat a record
+                if row["id"] not in seen:
+                    seen.add(row["id"]); uniq.append(row)
+            total += len(uniq); courts += 1
+            if dry or not uniq:
+                return
+            data = pack(uniq)
+            path = f"judgments/hc/{court}/{year}.jsonl.gz"
+            b2.put(path, data, "application/gzip")
+            _record(db, path, "judgments", 13, data, title=f"{names.get(court, court)} {year}", court=court, year=year, rows=len(uniq), source=HC_SOURCE)
+
         with httpx.Client(timeout=600) as c:
             for key in hc_keys(year):
                 m = re.search(r"court=([\d_]+)/bench=([^/]+)/", key)
                 if not m:
                     continue
                 court, bench = m.group(1), m.group(2)
+                for done in [k for k in by_court if k != court]:
+                    flush(done)
                 r = c.get(f"{HC_BUCKET}/{key}")
                 if r.status_code != 200:
                     print(f"  {year} {key}: {r.status_code}", flush=True)
@@ -420,20 +440,9 @@ def hc_to_files(years: list[int], dry: bool = False) -> None:
                                 names[court] = row["court_name"] or names.get(court, court)
                 except tarfile.TarError as exc:
                     print(f"  {year} {key}: {exc}", flush=True)
-        total = 0
-        for court, rows in by_court.items():
-            seen, uniq = set(), []
-            for row in rows:  # a bench split into parts can repeat a record
-                if row["id"] not in seen:
-                    seen.add(row["id"]); uniq.append(row)
-            total += len(uniq)
-            if dry:
-                continue
-            data = pack(uniq)
-            path = f"judgments/hc/{court}/{year}.jsonl.gz"
-            b2.put(path, data, "application/gzip")
-            _record(db, path, "judgments", 13, data, title=f"{names.get(court, court)} {year}", court=court, year=year, rows=len(uniq), source=HC_SOURCE)
-        print(f"{year}: {total:,} High Court judgments and orders in {len(by_court)} courts", flush=True)
+            for done in list(by_court):
+                flush(done)
+        print(f"{year}: {total:,} High Court judgments and orders in {courts} courts", flush=True)
 
 
 def main() -> int:
