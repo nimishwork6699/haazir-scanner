@@ -55,7 +55,8 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def s3_keys(bucket: str, prefix: str) -> list[tuple[str, int]]:
+def s3_keys(bucket: str, prefix: str, modified: bool = False) -> list[tuple]:
+    """(key, size), or (key, size, last modified as ISO time) with modified=True."""
     ns = "{http://s3.amazonaws.com/doc/2006-03-01/}"
     out, token = [], None
     with httpx.Client(timeout=120) as c:
@@ -64,7 +65,8 @@ def s3_keys(bucket: str, prefix: str) -> list[tuple[str, int]]:
             if token:
                 params["continuation-token"] = token
             root = ET.fromstring(c.get(f"{bucket}/", params=params).content)
-            out += [(k.find(f"{ns}Key").text, int(k.find(f"{ns}Size").text)) for k in root.findall(f"{ns}Contents")]
+            out += [(k.find(f"{ns}Key").text, int(k.find(f"{ns}Size").text)) + ((k.find(f"{ns}LastModified").text,) if modified else ())
+                    for k in root.findall(f"{ns}Contents")]
             if root.find(f"{ns}IsTruncated").text != "true":
                 return out
             token = root.find(f"{ns}NextContinuationToken").text
@@ -127,28 +129,40 @@ def out_prefix(ds: str, key: str) -> str:
     return f"library/district/{y}/{m.group(1)}"   # district: the unit is a state's year, the key one of its bundles
 
 
-def bundles(ds: str) -> list[tuple[str, int]]:
-    """Every source bundle of a set, with its size."""
+def bundles(ds: str) -> list[tuple[str, int, str]]:
+    """Every source bundle of a set: (key, size, last modified)."""
     if ds in ("sc", "hc", "dc"):
-        return [(k, s) for k, s in s3_keys(BUCKETS[ds], "data/tar/") if k.endswith(".tar") and "part-mobile" not in k]
-    return [(k, s) for k, s in s3_keys(BUCKETS[ds], "metadata/tar/") if re.search(r"\.tar(\.gz)?$", k)]
+        return [b for b in s3_keys(BUCKETS[ds], "data/tar/", True) if b[0].endswith(".tar") and "part-mobile" not in b[0]]
+    return [b for b in s3_keys(BUCKETS[ds], "metadata/tar/", True) if re.search(r"\.tar(\.gz)?$", b[0])]
 
 
-def done_prefixes(db: DB, ds: str) -> set[str]:
+def done_prefixes(db: DB, ds: str) -> dict[str, str]:
+    """Output prefix -> when it was stored (the oldest of its files)."""
     root = "library/district/" if ds == "district" else f"library/fulltext/{ds}/"
-    rows = db.select("library_files", f"select=path&path=like.{root}*&order=path")
-    if ds == "district":
-        return {r["path"].removesuffix(".jsonl.gz") for r in rows}
-    return {re.sub(r"_\d{3}\.jsonl\.gz$", "", r["path"]) for r in rows}
+    out: dict[str, str] = {}
+    for r in db.select("library_files", f"select=path,updated_at&path=like.{root}*&order=path"):
+        p = r["path"].removesuffix(".jsonl.gz") if ds == "district" else re.sub(r"_\d{3}\.jsonl\.gz$", "", r["path"])
+        out[p] = min(out.get(p, r["updated_at"]), r["updated_at"])
+    return out
+
+
+def _stamp(t: str) -> datetime:
+    return datetime.fromisoformat(t.replace("Z", "+00:00"))
 
 
 def plan(ds: str) -> int:
+    """What is not stored yet, or changed at the source since it was stored (the monthly refresh relies on this)."""
     db, b2, drive = DB(), B2(), Drive()
     done = done_prefixes(db, ds)
-    todo: dict[str, list] = {}     # unit name -> its bundles; a district unit is a state's year (one output file)
-    for k, s in bundles(ds):
+    found = bundles(ds)
+    newest: dict[str, str] = {}    # a district unit is redone when any of its state's bundles for that year changed
+    for k, _, m in found:
         p = out_prefix(ds, k)
-        if p in done:
+        newest[p] = max(newest.get(p, m), m)
+    todo: dict[str, list] = {}     # unit name -> its bundles; a district unit is a state's year (one output file)
+    for k, s, _ in found:
+        p = out_prefix(ds, k)
+        if p in done and _stamp(done[p]) >= _stamp(newest[p]):
             continue
         todo.setdefault(p if ds == "district" else k, []).append((k, s))
     groups = sorted(todo.values(), key=lambda g: -sum(s for _, s in g))
