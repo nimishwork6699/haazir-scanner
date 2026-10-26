@@ -363,7 +363,7 @@ def _hc_row(raw: dict, name: str, court: str, bench: str) -> dict | None:
         # A label with no value is followed straight by the next label ("Disposal Nature : | Court : …").
         if p.rstrip(" :") in labels and not nxt.startswith(("Court :", "Judge")) and nxt.rstrip(" :") not in labels:
             facts[p.rstrip(" :")] = nxt
-    judge = next((p.split(":", 1)[1].strip() for p in parts if p.startswith("Judge")), None)
+    judge = next((p.partition(":")[2].strip() or None for p in parts if p.startswith("Judge") and ":" in p), None)
     court_part = next((p for p in parts if p.startswith("Court :")), "")
     snippet = next((p for p in parts[1:] if len(p) > 60 and not p.startswith(("Judge", "Court :"))), None)
     stem = (raw.get("pdf_link") or "").rsplit("/", 1)[-1].removesuffix(".pdf")
