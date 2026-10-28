@@ -3,5 +3,5 @@
 #        work/ocr-try/ and the library is not changed. Leave it empty for a real run.
 # items: the text files to OCR: item numbers, item:folder for one folder of an item.
 # Left for later (still being loaded on the laptop): 20 33:cat 33:atfp
-try: drive library/law-commission/text/commission-10.jsonl.gz 1; b2 rules/central/2017.jsonl.gz 2; drive library/state/karnataka/acts/1890s-2010s.jsonl.gz 1; drive library/tribunals/aptel/text/2010.jsonl.gz 1; drive library/tribunals/ibbi/text/2018.jsonl.gz 2; drive library/notifications/notification/2016-01.jsonl.gz 1
+try:
 items: 10 11 18 21 22 24 25 27 28 29 31 33:ibbi 33:tdsat 33:cci 33:aptel 33:gst-aar

@@ -3,7 +3,7 @@ legacy Hindi fonts such as Krutidev, whose text layer reads "jftLVªh laö Mhö"
 
 Which documents: only those whose text is empty or scan-only (scan_only / scan / text_status other than "ok"), or
 fails the readability rule below (readable(), tested by haazir.ocr_check). Good text is never OCR'd.
-How: pdftoppm (300 dpi) and tesseract -l hin+eng, page by page. A page whose own PDF text already reads well keeps that
+How: pdftoppm (300 dpi) and tesseract -l eng+hin, page by page (English alone on a Latin-script page). A page whose own PDF text already reads well keeps that
 text; only empty or garbled pages are OCR'd. Documents longer than MAX_PAGES are OCR'd up to that page and marked
 ocr_capped (later pages keep their PDF text).
 Writing back: the row's text is replaced and text_source "ocr", ocr_pages (pages OCR'd) and ocr_at are added; every
@@ -27,7 +27,7 @@ GitHub machines (.github/workflows/ocr.yml):
 A rerun skips documents already marked text_source "ocr" (or ocr_error: the PDF itself could not be read), and a unit
 saves its file every few minutes, so a cut-short run loses little. One bad PDF never stops a unit.
 
-Languages: hin+eng, except a document in another Indian language (title "… in Tamil") or a state's act or rule (item 18,
+Languages: eng+hin, except a document in another Indian language (title "… in Tamil") or a state's act or rule (item 18,
 row "state"), which is read in that language and English (ocr_langs).
 
 Now:    10 11 18 21 22 24 25 27 28 29 31 33:ibbi 33:tdsat 33:cci 33:aptel 33:gst-aar
@@ -61,7 +61,7 @@ from .storage import B2, Drive
 UNITS = 250             # GitHub runs at most 256 jobs from one list
 MAX_PAGES = 300         # pages OCR'd per document at most
 DPI = 300
-LANGS = "hin+eng"
+LANGS = "eng+hin"     # English first: with Hindi first, tesseract drops the digit 1 ("2018" read "208")
 SAVE_EVERY = 15 * 60    # seconds between saves of a text file being worked on
 UNIT_BUDGET = 320 * 60  # a unit stops starting new documents after this (the job is cut at 350 minutes)
 SKIP_KINDS = {"judgments", "judgment_index", "tribunal_skipped", "acts_sections", "quantum_table"}
@@ -103,7 +103,7 @@ VOWEL = re.compile(r"[aeiouyAEIOUY]")
 NO_VOWEL_OK = {"mr", "dr", "st", "ltd", "pvt", "vs", "nd", "th", "rd", "sh", "smt", "shri", "hrs", "kg", "km", "mm", "cm", "rs",
                "sq", "ft", "pp", "cr", "crpc", "cpc", "ipc", "cbdt", "sebi"}
 DEVANAGARI = re.compile(r"[\u0900-\u097F\u200c\u200d]+(?:[-.][\u0900-\u097F\u200c\u200d]+)*\.?")
-# Other Indian scripts (Bengali to Malayalam) and Urdu: read as words, never OCR'd with hin+eng. (Broken Hindi fonts
+# Other Indian scripts (Bengali to Malayalam) and Urdu: read as words, never OCR'd with eng+hin. (Broken Hindi fonts
 # put letters at Vedic, Sundanese or Ol Chiki code points, U+1B80-U+1CFF: those tokens are not words.)
 OTHER_SCRIPT = re.compile(r"(?:[\u0980-\u0DFF\u200c\u200d]+|[\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF\u200c]+)")
 # India Code stamps "IndiaCode" across its PDFs; pdftotext reads pieces of it into the words ("iaC", "diaC", "IndiaCo").
@@ -260,6 +260,11 @@ STATE_LANGUAGES = {"karnataka": "kan", "tamil nadu": "tam", "puducherry": "tam",
                    "maharashtra": "mar", "goa": "mar", "manipur": "ben", "jammu": "urd", "ladakh": "urd", "sikkim": "nep"}
 
 
+def _with_eng(code: str) -> str:
+    """English added: first for Devanagari models (they lose the digit 1 when first), last for the other scripts."""
+    return "eng+" + code if code.split("+")[0] in ("hin", "mar", "nep", "san") else code + "+eng"
+
+
 def ocr_langs(row: dict) -> str | None:
     """tesseract's -l for this document, or None when there is no model for its language."""
     lang = str(row.get("language") or "").lower()
@@ -268,14 +273,14 @@ def ocr_langs(row: dict) -> str | None:
         lang = (m.group(1).lower().replace("(", "").replace(")", "") if m else "") or lang
     for name, code in sorted(LANGUAGES.items(), key=lambda kv: -len(kv[0])):
         if name in lang and name not in ("english", "hindi"):
-            return code if code.endswith("eng") else code + "+eng"
+            return _with_eng(code)
     if any(n in lang for n in NO_OCR_LANGUAGES):
         return None
     state = str(row.get("state") or "").lower()
     if state and state != "central":
         for name, code in STATE_LANGUAGES.items():
             if name in state:
-                return f"{code}+eng"
+                return _with_eng(code)
     return LANGS
 
 

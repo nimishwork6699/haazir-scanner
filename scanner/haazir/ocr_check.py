@@ -152,14 +152,14 @@ def main() -> int:
     check(ref == {"store": "drive", "zip": "library/rules/central/2017.pdf-1.zip", "offset": 77, "size": 1000, "name": "a.pdf", "pages": 3},
           "India Code row: its PDF is a ranged read of the zip")
     print("Language of the OCR:")
-    for title, lang, want in [("The Constitution of India in Tamil", None, "tam+eng"), ("The Constitution of India in Santhali Devanagari script", None, "hin+eng"),
-                              ("The Constitution of India in Santhali", None, None), ("Rules, 2017", None, "hin+eng"),
-                              ("Report No. 95", "English", "hin+eng"), ("The Constitution of India in Marathi", None, "mar+hin+eng"),
-                              ("Notification in exercise of powers", None, "hin+eng")]:
+    for title, lang, want in [("The Constitution of India in Tamil", None, "tam+eng"), ("The Constitution of India in Santhali Devanagari script", None, "eng+hin"),
+                              ("The Constitution of India in Santhali", None, None), ("Rules, 2017", None, "eng+hin"),
+                              ("Report No. 95", "English", "eng+hin"), ("The Constitution of India in Marathi", None, "eng+mar+hin"),
+                              ("Notification in exercise of powers", None, "eng+hin")]:
         got = ocr.ocr_langs({"title": title, "language": lang})
         check(got == want, f"{title!r}: {got}")
-    for state, want in [("Karnataka", "kan+eng"), ("Tamil Nadu", "tam+eng"), ("West Bengal", "ben+eng"), ("Uttar Pradesh", "hin+eng"),
-                        ("CENTRAL", "hin+eng"), ("Maharashtra", "mar+eng")]:
+    for state, want in [("Karnataka", "kan+eng"), ("Tamil Nadu", "tam+eng"), ("West Bengal", "ben+eng"), ("Uttar Pradesh", "eng+hin"),
+                        ("CENTRAL", "eng+hin"), ("Maharashtra", "eng+mar")]:
         got = ocr.ocr_langs({"title": "THE SRINIVAS UNIVERSITY ACT, 2013", "state": state})
         check(got == want, f"a state act of {state}: {got}")
     print("Writing back:")
