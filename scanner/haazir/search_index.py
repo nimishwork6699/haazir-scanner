@@ -10,6 +10,8 @@ read with HTTP range reads (no search server).
     python -m haazir.search_index cnr <CNR>                    exact lookup
     python -m haazir.search_index bench [--manifest NAME]      the 20 test queries, cold and warm, timed
     python -m haazir.search_index sample                       the local proof: plan + every unit + every part + manifest
+    python -m haazir.search_index mirror [MB]                  copy Backblaze sources to Drive, at most MB of downloads
+                                                               (default 700), so rebuilds stay under Backblaze's daily cap
 
 How it is built (a map/reduce, so each source file is read once; see the report for why the design's 16 full passes
 were changed):
@@ -660,6 +662,75 @@ def _rows(data: bytes):
                 yield json.loads(line)
 
 
+# ---- Drive copies of the Backblaze sources
+# Backblaze's free tier caps downloads per day (the first full build hit "download_cap_exceeded" after ~1.8 GB of High
+# Court summaries, 28 Oct 2026). A source read from Backblaze is copied to Drive (search/src/<path>, item 34) and later
+# builds read the copy while it is of the same version (same bytes and time in library_files), so a rebuild downloads
+# from Backblaze only what changed.
+
+MIRROR = "search/src"
+_MIRROR = {"drive": None, "db": None}
+
+
+def _mirror_tools():
+    if _MIRROR["drive"] is None:
+        from .db import DB
+        _MIRROR["drive"], _MIRROR["db"] = Store("drive"), DB()
+    return _MIRROR["drive"], _MIRROR["db"]
+
+
+def _version(db, path: str) -> str | None:
+    r = db.select("library_files", f"select=bytes,updated_at&path=eq.{path}")
+    return f"Drive copy of Backblaze {path} ({r[0]['bytes']} bytes, {r[0]['updated_at']})" if r else None
+
+
+def mirror_get(path: str) -> bytes | None:
+    drive, db = _mirror_tools()
+    try:
+        want = _version(db, path)
+        have = db.select("library_files", f"select=source&path=eq.{MIRROR}/{path}")
+        if want and have and have[0]["source"] == want:
+            return drive.get(f"{MIRROR}/{path}")
+    except Exception as e:  # noqa: BLE001 - no copy: read Backblaze
+        print(f"  (no Drive copy of {path}: {e})", flush=True)
+    return None
+
+
+def mirror_put(path: str, data: bytes) -> None:
+    drive, db = _mirror_tools()
+    try:
+        want = _version(db, path)
+        drive.put(f"{MIRROR}/{path}", data, "application/gzip")
+        db.insert("library_files", {"path": f"{MIRROR}/{path}", "store": "drive", "kind": "search_source", "item": ITEM,
+                                    "bytes": len(data), "source": want, "title": f"Search index source copy: {path}",
+                                    "updated_at": _now()}, upsert_on="path")
+    except Exception as e:  # noqa: BLE001 - the build goes on without the copy
+        print(f"  (could not copy {path} to Drive: {e})", flush=True)
+
+
+def mirror(max_mb: float) -> None:
+    """Copy Backblaze sources (items 12, 13, 33) to Drive, at most max_mb of downloads in this run (stay under the
+    daily cap); newest first. Run on a few days to copy them all."""
+    from .db import DB
+    from .storage import B2
+    db, b2 = DB(), B2()
+    have = {r["path"][len(MIRROR) + 1:]: r["source"] for r in db.select("library_files", f"select=path,source&path=like.{MIRROR}/*&order=path")}
+    todo = [s for s in sources(db) if s["store"] == "b2" and s["level"] != "tribunal"]
+    spent = 0
+    for s in todo:
+        want = _version(db, s["path"])
+        if have.get(s["path"]) == want:
+            continue
+        size = (db.select("library_files", f"select=bytes&path=eq.{s['path']}") or [{"bytes": 0}])[0]["bytes"] or 0
+        if spent + size > max_mb * 1e6:
+            break
+        data = b2.get(s["path"])
+        spent += len(data or b"")
+        if data:
+            mirror_put(s["path"], data)
+    print(f"  copied {spent / 1e6:.0f} MB from Backblaze to Drive ({MIRROR}/)")
+
+
 def unit_docs(unit: list[dict]):
     """(level, year, terms, keys, record) for every row of a unit, in doc order."""
     srcs = {"b2": None, "drive": None}
@@ -671,6 +742,10 @@ def unit_docs(unit: list[dict]):
         if local and os.path.exists(local):
             with open(local, "rb") as fh:
                 return fh.read()
+        if store == "b2":
+            d = mirror_get(path)  # the Drive copy, when it is of the same version (no Backblaze download)
+            if d is not None:
+                return d
         if srcs[store] is None:
             srcs[store] = _source(store)
         for attempt in range(5):
@@ -681,6 +756,8 @@ def unit_docs(unit: list[dict]):
                 if local:
                     with open(local, "wb") as fh:
                         fh.write(d)
+                if store == "b2":
+                    mirror_put(path, d)
                 return d
             except Exception:  # noqa: BLE001
                 if attempt == 4:
@@ -1067,10 +1144,15 @@ def run_manifest(build: str, root: str, store_kind: str, pointer: str | None = N
     data = gzip.compress(json.dumps(man, separators=(",", ":")).encode(), 9)
     st.put(f"{base}/manifest.json.gz", data, "application/gzip")
     _record(db, f"{base}/manifest.json.gz", store_kind, "search_manifest", len(data), title=f"Search index {build}: manifest", rows=total)
-    # The swap: one write of the pointer name on Backblaze (a single small file, so it is all or nothing).
+    # The swap: one write of the pointer file (a single small file, replaced whole, so readers see the old build or the
+    # new one, never half). Readers take it from Drive (no daily download cap); the Backblaze copy is a fallback.
     ptr = pointer or manifest_name(root)
-    B2().put(ptr, data, "application/gzip")
-    _record(db, ptr, "b2", "search_manifest", len(data), title=f"Search index manifest (live): build {build}", rows=total)
+    Store("drive").put(ptr, data, "application/gzip")
+    try:
+        B2().put(ptr, data, "application/gzip")  # an upload: not counted against Backblaze's download cap
+    except Exception as e:  # noqa: BLE001
+        print(f"  (Backblaze copy of the pointer not written: {e})", flush=True)
+    _record(db, ptr, "drive", "search_manifest", len(data), title=f"Search index manifest (live; also on Backblaze): build {build}", rows=total)
     print(f"  manifest {ptr}: build {build}, {total:,} docs, {man['stats']['terms']:,} terms, "
           f"docs {man['stats']['bytes']['docs'] / 1e9:.2f} GB, postings {man['stats']['bytes']['postings'] / 1e9:.2f} GB, "
           f"manifest {len(data) / 1e6:.2f} MB", flush=True)
@@ -1529,11 +1611,21 @@ BENCH = ["anticipatory bail 438", "section 138 negotiable instruments", "ICICI L
          "Shriram Finance", "land acquisition compensation", "रिट याचिका"]
 
 
+def read_manifest(name: str) -> bytes:
+    """The manifest pointer: from Drive (no download cap), else its Backblaze copy."""
+    raw = Store("drive").get(name)
+    if raw is None:
+        from .storage import B2
+        raw = B2().get(name)
+    if raw is None:
+        raise RuntimeError(f"no manifest at {name}")
+    return raw
+
+
 def bench(manifest: str, store_kind: str | None, queries: list[str] | None = None) -> list[dict]:
-    from .storage import B2
     out = []
     t0 = time.time()
-    raw = B2().get(manifest)
+    raw = read_manifest(manifest)
     tm = time.time() - t0
     ix = Index(raw, Store(store_kind) if store_kind else None)
     print(f"  manifest {manifest} ({len(raw) / 1e6:.2f} MB) read in {tm * 1000:.0f} ms; store {ix.st.kind}; build {ix.m['build']}")
@@ -1566,7 +1658,7 @@ def main() -> int:
     except (AttributeError, ValueError):
         pass
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=["plan", "docs", "postings", "manifest", "status", "query", "cnr", "bench", "sample"])
+    ap.add_argument("cmd", choices=["plan", "docs", "postings", "manifest", "status", "query", "cnr", "bench", "sample", "mirror"])
     ap.add_argument("arg", nargs="?")
     ap.add_argument("--build")
     ap.add_argument("--root", default="search/v1")
@@ -1614,7 +1706,9 @@ def main() -> int:
         if a.store == "drive":
             copy_to_b2(f"{root}/manifest-drive.json.gz", f"{root}/manifest-b2.json.gz")
         return 0
-    from .storage import B2
+    if a.cmd == "mirror":
+        mirror(float(a.arg or 700))
+        return 0
     name = a.manifest or manifest_name(a.root)
     if a.cmd == "bench":
         rows = bench(name, None)
@@ -1622,10 +1716,10 @@ def main() -> int:
             from .db import DB
             data = json.dumps({"manifest": name, "at": _now(), "where": "github-actions" if os.environ.get("GITHUB_ACTIONS") else "local",
                                "rows": rows}, ensure_ascii=False).encode()
-            B2().put(a.save, data, "application/json")
-            _record(DB(), a.save, "b2", "search_bench", len(data), title=f"Search timing: {name}", rows=len(rows))
+            Store("drive").put(a.save, data, "application/json")
+            _record(DB(), a.save, "drive", "search_bench", len(data), title=f"Search timing: {name}", rows=len(rows))
         return 0
-    ix = Index(B2().get(name))
+    ix = Index(read_manifest(name))
     if a.cmd == "cnr":
         for r in lookup_cnr(ix, a.arg):
             print(json.dumps(r, ensure_ascii=False))

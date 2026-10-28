@@ -12,7 +12,7 @@ on:
         description: "items to OCR; item:folder for one folder (e.g. 10 11 18 21 22 24 25 27 28 29 31 33:ibbi 33:tdsat 33:cci 33:aptel 33:gst-aar)"
         default: "10 11 18 21 22 24 25 27 28 29 31 33:ibbi 33:tdsat 33:cci 33:aptel 33:gst-aar"
       try:
-        description: "test only: '<store> <text file path> <n>' (several joined by ';') OCRs n documents of each file into Backblaze work/ocr-try/ (the library is not changed); blank for a real run"
+        description: "test only: '<store> <text file path> <n>' (several joined by ';') OCRs n documents of each file into Drive work/ocr-try/ (the library is not changed); blank for a real run"
         default: ""
   push:
     branches: [main]

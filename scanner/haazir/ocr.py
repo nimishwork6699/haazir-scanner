@@ -18,11 +18,11 @@ A spec picks the text files: item numbers, and item:folder for one folder of an 
 library/tribunals/ibbi/...). Index and summary files are never touched. Like haazir.fulltext, the work runs on many
 GitHub machines (.github/workflows/ocr.yml):
   python -m haazir.ocr plan "<spec>"           text files with documents still to OCR, bin-packed by pages into up to
-                                                250 units (Backblaze work/ocr-<hash>.json); prints the unit count
+                                                250 units (Drive work/ocr/ocr-<hash>.json); prints the unit count
   python -m haazir.ocr run "<spec>" <i>         does unit i
   python -m haazir.ocr status "<spec>"          per item: needing OCR, OCR'd, still failing, size before and now
   python -m haazir.ocr try <store> <path> [n]   OCR the first n documents of one text file that need it; the result goes
-                                                to Backblaze work/ocr-try/... only, never to the library
+                                                to Drive work/ocr-try/... only, never to the library
   python -m haazir.ocr measure <item> [files]   empty / scan-only / garbled counts in a random sample (no OCR)
 A rerun skips documents already marked text_source "ocr" (or ocr_error: the PDF itself could not be read), and a unit
 saves its file every few minutes, so a cut-short run loses little. One bad PDF never stops a unit.
@@ -298,11 +298,37 @@ def est_pages(row: dict) -> int:
 
 # ---------------------------------------------------------------- stores
 
+class B2Capped(RuntimeError):
+    """Backblaze refuses downloads for the rest of the day (free tier: 1 GB and 2,500 downloads a day, shared with the
+    website). Every later Backblaze read in this run is skipped at once; the documents wait for the next run."""
+
+
 class Stores:
     def __init__(self) -> None:
         self._b2: B2 | None = None
         self._drive: Drive | None = None
         self._ids: dict[str, str | None] = {}
+        self.b2_capped = False
+
+    def _b2_read(self, name: str, rng: str | None = None) -> bytes | None:
+        """One Backblaze download, with a range if given. The daily cap answers 403 download_cap_exceeded."""
+        if self.b2_capped:
+            raise B2Capped("Backblaze daily download cap reached")
+        b2 = self.of("b2")
+        for attempt in range(4):
+            a = b2._authorize(again=attempt > 0)
+            r = b2.http.get(f"{a['apiInfo']['storageApi']['downloadUrl']}/file/{b2.bucket}/{name}",
+                            headers={"Authorization": a["authorizationToken"], **({"Range": rng} if rng else {})})
+            if r.status_code == 403 and "cap_exceeded" in r.text:
+                self.b2_capped = True
+                print("    Backblaze: daily download cap reached; its files are left for the next run", flush=True)
+                raise B2Capped("Backblaze daily download cap reached")
+            if r.status_code == 404:
+                return None
+            if r.status_code in (200, 206):
+                return r.content
+            time.sleep(2 ** attempt)
+        raise RuntimeError(f"Backblaze download of {name} kept failing")
 
     def of(self, store: str):
         if store == "b2":
@@ -317,6 +343,8 @@ class Stores:
         for attempt in range(6):
             try:
                 return fn(*a)
+            except B2Capped:
+                raise
             except (httpx.HTTPError, RuntimeError) as e:
                 if attempt == 5:
                     raise
@@ -324,6 +352,8 @@ class Stores:
                 time.sleep(10 * (attempt + 1))
 
     def get(self, store: str, path: str) -> bytes | None:
+        if store == "b2":
+            return self.again(self._b2_read, path)
         return self.again(self.of(store).get, path)
 
     def put(self, store: str, path: str, data: bytes, ctype: str) -> None:
@@ -332,10 +362,7 @@ class Stores:
     def _range(self, ref: dict) -> bytes:
         lo, hi = ref["offset"], ref["offset"] + ref["size"] - 1
         if ref["store"] == "b2":
-            b2 = self.of("b2")
-            a = b2._authorize()
-            r = b2.http.get(f"{a['apiInfo']['storageApi']['downloadUrl']}/file/{b2.bucket}/{ref['zip']}",
-                            headers={"Authorization": a["authorizationToken"], "Range": f"bytes={lo}-{hi}"})
+            content = self._b2_read(ref["zip"], f"bytes={lo}-{hi}") or b""
         else:
             d = self.of("drive")
             if ref["zip"] not in self._ids:
@@ -344,10 +371,19 @@ class Stores:
             if not fid:
                 raise FileNotFoundError(ref["zip"])
             r = d._call("GET", f"https://www.googleapis.com/drive/v3/files/{fid}", params={"alt": "media"}, headers={"Range": f"bytes={lo}-{hi}"})
-        r.raise_for_status()
-        if len(r.content) != ref["size"]:
-            raise RuntimeError(f"{ref['zip']}: asked for {ref['size']} bytes, got {len(r.content)}")
-        return r.content
+            r.raise_for_status()
+            content = r.content
+        if len(content) != ref["size"]:
+            raise RuntimeError(f"{ref['zip']}: asked for {ref['size']} bytes, got {len(content)}")
+        return content
+
+    # The run's own work files (plan, sizes before) live in Drive: Backblaze downloads are capped per day and the
+    # website needs them.
+    def work_get(self, name: str) -> bytes | None:
+        return self.again(self.of("drive").get, f"work/ocr/{name}")
+
+    def work_put(self, name: str, data: bytes) -> None:
+        self.put("drive", f"work/ocr/{name}", data, "application/json")
 
     def pdf(self, ref: dict) -> bytes | None:
         if "zip" in ref:
@@ -513,13 +549,19 @@ def text_files(db: DB, spec: str) -> list[dict]:
 # ---------------------------------------------------------------- plan, run, status
 
 def plan(spec: str) -> int:
-    db, st, b2 = DB(), Stores(), B2()
+    db, st = DB(), Stores()
     name = set_name(spec)
     files = text_files(db, spec)
-    work, before = [], {}
+    before = _before(st, name)
+    work, skipped = [], []
     for f in files:
-        before[f["path"]] = f["bytes"]
-        data = st.get(f["store"], f["path"])
+        before.setdefault(f["path"], f["bytes"])
+        try:
+            data = st.get(f["store"], f["path"])
+        except Exception as e:  # noqa: BLE001 - e.g. Backblaze's daily cap: the file waits for the next run
+            skipped.append(f["path"])
+            print(f"  {f['path']}: not read now ({type(e).__name__}); left for the next run", file=sys.stderr, flush=True)
+            continue
         if not data:
             continue
         rows = unpack(data)
@@ -534,13 +576,23 @@ def plan(spec: str) -> int:
         i = sizes.index(min(sizes))
         units[i].append({"path": path, "store": store, "item": item})
         sizes[i] += pages
-    b2.put(f"work/{name}.json", json.dumps({"spec": spec, "units": units}).encode(), "application/json")
-    if b2.get(f"work/{name}-before.json") is None:
-        b2.put(f"work/{name}-before.json", json.dumps(before).encode(), "application/json")
+    st.work_put(f"{name}.json", json.dumps({"spec": spec, "units": units}).encode())
+    st.work_put(f"{name}-before.json", json.dumps(before).encode())
     print(f"{spec}: {sum(w[3] for w in work):,} documents in {len(work)} files to OCR, about {sum(sizes):,} pages, in "
-          f"{len(units)} units (biggest {max(sizes or [0]):,} pages)", file=sys.stderr, flush=True)
+          f"{len(units)} units (biggest {max(sizes or [0]):,} pages); {len(skipped)} files not readable now", file=sys.stderr, flush=True)
     print(len(units))
     return len(units)
+
+
+def _before(st: Stores, name: str) -> dict:
+    """Each text file's size before its first OCR run (kept from the first plan, for the size change in status)."""
+    raw = st.work_get(f"{name}-before.json")
+    if raw is None:   # the first runs kept it in Backblaze
+        try:
+            raw = st.get("b2", f"work/{name}-before.json")
+        except Exception:  # noqa: BLE001
+            raw = None
+    return json.loads(raw) if raw else {}
 
 
 def _key(r: dict) -> tuple:
@@ -586,12 +638,11 @@ class TextFile:
 
 def run(spec: str, index: int, workers: int) -> None:
     t0 = time.time()
-    b2 = B2()
-    plan_ = json.loads(b2.get(f"work/{set_name(spec)}.json") or b"{}")
+    db, st = DB(), Stores()
+    plan_ = json.loads(st.work_get(f"{set_name(spec)}.json") or b"{}")
     units = plan_.get("units", [])
     if index >= len(units):
         print(f"unit {index}: nothing (there are {len(units)})"); return
-    db, st = DB(), Stores()
     totals = Counter()
     with ThreadPoolExecutor(workers) as pool:
         for f in units[index]:
@@ -654,13 +705,18 @@ def run(spec: str, index: int, workers: int) -> None:
 
 
 def status(spec: str) -> None:
-    db, st, b2 = DB(), Stores(), B2()
-    before = json.loads(b2.get(f"work/{set_name(spec)}-before.json") or b"{}")
+    db, st = DB(), Stores()
+    before = _before(st, set_name(spec))
     by: dict[int, Counter] = {}
     samples: dict[int, list] = {}
     for f in text_files(db, spec):
         c = by.setdefault(f["item"], Counter())
-        rows = unpack(st.get(f["store"], f["path"]) or gzip.compress(b""))
+        try:
+            rows = unpack(st.get(f["store"], f["path"]) or gzip.compress(b""))
+        except Exception as e:  # noqa: BLE001
+            print(f"  {f['path']}: not read now ({type(e).__name__})")
+            c["files_unread"] += 1
+            continue
         c["bytes_before"] += before.get(f["path"], f["bytes"])
         c["bytes_now"] += f["bytes"]
         for r in rows:
@@ -677,7 +733,8 @@ def status(spec: str) -> None:
     for item, c in sorted(by.items()):
         print(f"item {item}: needing OCR {c['ocr'] + c['bad_pdf'] + c['to_do']}, OCR'd {c['ocr']} ({c['pages']} pages), "
               f"still failing {c['still_unreadable'] + c['bad_pdf'] + c['to_do']} (unreadable after OCR {c['still_unreadable']}, "
-              f"bad PDF {c['bad_pdf']}, not done {c['to_do']}), size {c['bytes_before'] / 1e6:.2f} -> {c['bytes_now'] / 1e6:.2f} MB")
+              f"bad PDF {c['bad_pdf']}, not done {c['to_do']}), size {c['bytes_before'] / 1e6:.2f} -> {c['bytes_now'] / 1e6:.2f} MB"
+              + (f", {c['files_unread']} files not readable now" if c["files_unread"] else ""))
         for path, r in random.sample(samples.get(item, []), min(3, len(samples.get(item, [])))):
             words = " ".join(r["text"].split())
             mid = len(words) // 3
@@ -723,8 +780,8 @@ def try_file(store: str, path: str, n: int, workers: int) -> None:
             except Exception as e:  # noqa: BLE001
                 print(f"  {(r.get('title') or r.get('file') or '')[:70]}: {type(e).__name__}: {e}", flush=True)
     dest = "work/ocr-try/" + re.sub(r"[^A-Za-z0-9._-]+", "_", path)
-    B2().put(dest, pack(out), "application/gzip")
-    print(f"{len(out)} documents OCR'd -> Backblaze {dest}")
+    st.put("drive", dest, pack(out), "application/gzip")
+    print(f"{len(out)} documents OCR'd -> Drive {dest}")
 
 
 def measure(item: int, n_files: int) -> None:

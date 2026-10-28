@@ -1,10 +1,12 @@
 # Starts a library search index run (.github/workflows/search-index.yml, haazir.search_index) when a change to this
 # file is published.
-# build:    empty for a new build; a build id (b20261028-1200) to carry on one that stopped part way
+# build:    empty for a new build; a build id (b20261028-1037) to carry on one that stopped part way
 # step:     all (build, swap the manifest, then time the 20 test queries) | bench (only the timing)
 # bench_b2: yes to also time the sample index's Backblaze copy (about 300 Backblaze reads of the 2,500 free a day)
-# run:      1 (change this number to start the same request again)
+# run:      change this number to start the same request again
+# 28 Oct: build b20261028-1037 has 95 of 99 units; units 28, 30, 31, 32 (High Courts 2007-2013) stopped on Backblaze's
+# daily download cap. Carry it on after the cap resets (00:00 UTC): build: b20261028-1037, step: all, run: 3.
 build:
-step: all
+step: bench
 bench_b2: no
-run: 1
+run: 2
