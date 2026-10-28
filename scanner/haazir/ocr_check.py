@@ -148,6 +148,10 @@ def main() -> int:
     print("Rows picked for OCR:")
     for what, row, want in rows():
         check(ocr.needs_ocr(row) == want, f"{what}: {'OCR' if want else 'leave'}")
+    saved, ocr.STORES = ocr.STORES, {"drive"}   # a run with Backblaze downloads off (OCR_STORES=drive)
+    check(not ocr.needs_ocr(rows()[0][1] | {"store": "b2"}) and ocr.needs_ocr(rows()[0][1]) and ocr.needs_ocr_any_store(rows()[0][1] | {"store": "b2"}),
+          "Backblaze downloads off: a scan whose PDF is in Backblaze waits, one in Drive is OCR'd")
+    ocr.STORES = saved
     ref = ocr.pdf_ref(rows()[6][1])
     check(ref == {"store": "drive", "zip": "library/rules/central/2017.pdf-1.zip", "offset": 77, "size": 1000, "name": "a.pdf", "pages": 3},
           "India Code row: its PDF is a ranged read of the zip")

@@ -1,7 +1,10 @@
 # Starts an OCR run (.github/workflows/ocr.yml, haazir.ocr) when a change to this file is published.
-# try:   a test only, "<store> <text file path> <n>" joined by ";": n documents of each file are OCR'd into Backblaze
-#        work/ocr-try/ and the library is not changed. Leave it empty for a real run.
-# items: the text files to OCR: item numbers, item:folder for one folder of an item.
+# try:    a test only, "<store> <text file path> <n>" joined by ";": n documents of each file are OCR'd into Drive
+#         work/ocr-try/ and the library is not changed. Leave it empty for a real run.
+# items:  the text files to OCR: item numbers, item:folder for one folder of an item.
+# stores: where the run may download from. "drive" until after the customer demo: Backblaze's free daily download cap
+#         is shared with the website; its documents (item 10, parts of 11/24/27/29) wait. Later: "b2,drive".
 # Left for later (still being loaded on the laptop): 20 33:cat 33:atfp
 try:
 items: 10 11 18 21 22 24 25 27 28 29 31 33:ibbi 33:tdsat 33:cci 33:aptel 33:gst-aar
+stores: drive

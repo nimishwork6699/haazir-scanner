@@ -5,7 +5,7 @@ on:
   # Backblaze and Google Drive, OCRs the scanned or unreadable ones (tesseract, Hindi and English) and writes the text
   # files back. A run does only what is not OCR'd yet, so it can simply be started again.
   # Started by hand (gh workflow run ocr.yml -f items="..."), or by publishing a change to scanner/ocr-request.txt
-  # (its "items:" and "try:" lines are then the inputs).
+  # (its "items:", "try:" and "stores:" lines are then the inputs).
   workflow_dispatch:
     inputs:
       items:
@@ -14,6 +14,9 @@ on:
       try:
         description: "test only: '<store> <text file path> <n>' (several joined by ';') OCRs n documents of each file into Drive work/ocr-try/ (the library is not changed); blank for a real run"
         default: ""
+      stores:
+        description: "stores the run may download from: drive (Backblaze kept for the website: its free daily download cap is small) or b2,drive"
+        default: "drive"
   push:
     branches: [main]
     paths: [scanner/ocr-request.txt]
@@ -26,6 +29,7 @@ jobs:
     outputs:
       items: ${{ steps.r.outputs.items }}
       try: ${{ steps.r.outputs.try }}
+      stores: ${{ steps.r.outputs.stores }}
     steps:
       - uses: actions/checkout@v4
       - id: r
@@ -33,16 +37,20 @@ jobs:
           EVENT: ${{ github.event_name }}
           IN_ITEMS: ${{ inputs.items }}
           IN_TRY: ${{ inputs.try }}
+          IN_STORES: ${{ inputs.stores }}
         run: |
           if [ "$EVENT" = "workflow_dispatch" ]; then
-            items="$IN_ITEMS"; try="$IN_TRY"
+            items="$IN_ITEMS"; try="$IN_TRY"; stores="$IN_STORES"
           else
             items=$(sed -n 's/^items:[[:space:]]*//p' scanner/ocr-request.txt | head -1)
             try=$(sed -n 's/^try:[[:space:]]*//p' scanner/ocr-request.txt | head -1)
+            stores=$(sed -n 's/^stores:[[:space:]]*//p' scanner/ocr-request.txt | head -1)
           fi
+          stores="${stores:-drive}"
           echo "items=$items" >> "$GITHUB_OUTPUT"
           echo "try=$try" >> "$GITHUB_OUTPUT"
-          echo "items: $items"; echo "try: $try"
+          echo "stores=$stores" >> "$GITHUB_OUTPUT"
+          echo "items: $items"; echo "try: $try"; echo "stores: $stores"
 
   try:
     needs: request
@@ -63,6 +71,7 @@ jobs:
       GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
       GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
       TRY: ${{ needs.request.outputs.try }}
+      OCR_STORES: ${{ needs.request.outputs.stores }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -104,6 +113,7 @@ jobs:
       GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
       GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
       ITEMS: ${{ needs.request.outputs.items }}
+      OCR_STORES: ${{ needs.request.outputs.stores }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -141,6 +151,7 @@ jobs:
       GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
       GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
       ITEMS: ${{ needs.request.outputs.items }}
+      OCR_STORES: ${{ needs.request.outputs.stores }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

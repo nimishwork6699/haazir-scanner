@@ -64,6 +64,9 @@ DPI = 300
 LANGS = "eng+hin"     # English first: with Hindi first, tesseract drops the digit 1 ("2018" read "208")
 SAVE_EVERY = 15 * 60    # seconds between saves of a text file being worked on
 UNIT_BUDGET = 320 * 60  # a unit stops starting new documents after this (the job is cut at 350 minutes)
+# The stores a run may download from. OCR_STORES=drive keeps Backblaze out entirely (its free tier allows about 1 GB
+# of downloads a day, shared with the website's library and drafting); uploads to it are free and still happen.
+STORES = {s.strip() for s in (os.environ.get("OCR_STORES") or "b2,drive").split(",") if s.strip()}
 SKIP_KINDS = {"judgments", "judgment_index", "tribunal_skipped", "acts_sections", "quantum_table"}
 
 
@@ -242,8 +245,20 @@ def scan_flagged(row: dict) -> bool:
 
 
 def needs_ocr(row: dict) -> bool:
-    if row.get("text_source") == "ocr" or row.get("ocr_error") or pdf_ref(row) is None or ocr_langs(row) is None:
+    ref = pdf_ref(row)
+    if row.get("text_source") == "ocr" or row.get("ocr_error") or ref is None or ocr_langs(row) is None:
         return False
+    if ref["store"] not in STORES:
+        return False   # its PDF is in a store this run may not read (OCR_STORES): left for a later run
+    return scan_flagged(row) or not readable(row.get("text"))
+
+
+def needs_ocr_any_store(row: dict) -> bool:
+    """As needs_ocr, whichever store the PDF is in (for counting what a later run will do)."""
+    ref = pdf_ref(row)
+    if row.get("text_source") == "ocr" or row.get("ocr_error") or ref is None or ocr_langs(row) is None:
+        return False
+    return scan_flagged(row) or not readable(row.get("text"))
     return scan_flagged(row) or not readable(row.get("text"))
 
 
@@ -312,6 +327,8 @@ class Stores:
 
     def _b2_read(self, name: str, rng: str | None = None) -> bytes | None:
         """One Backblaze download, with a range if given. The daily cap answers 403 download_cap_exceeded."""
+        if "b2" not in STORES:
+            raise B2Capped("Backblaze downloads are off for this run (OCR_STORES)")
         if self.b2_capped:
             raise B2Capped("Backblaze daily download cap reached")
         b2 = self.of("b2")
@@ -556,6 +573,9 @@ def plan(spec: str) -> int:
     work, skipped = [], []
     for f in files:
         before.setdefault(f["path"], f["bytes"])
+        if f["store"] not in STORES:
+            skipped.append(f["path"])
+            continue
         try:
             data = st.get(f["store"], f["path"])
         except Exception as e:  # noqa: BLE001 - e.g. Backblaze's daily cap: the file waits for the next run
@@ -711,6 +731,9 @@ def status(spec: str) -> None:
     samples: dict[int, list] = {}
     for f in text_files(db, spec):
         c = by.setdefault(f["item"], Counter())
+        if f["store"] not in STORES:
+            c["files_unread"] += 1   # a Backblaze text file while Backblaze downloads are off: counted later
+            continue
         try:
             rows = unpack(st.get(f["store"], f["path"]) or gzip.compress(b""))
         except Exception as e:  # noqa: BLE001
@@ -730,11 +753,14 @@ def status(spec: str) -> None:
                 c["bad_pdf"] += 1
             elif needs_ocr(r):
                 c["to_do"] += 1
+            elif needs_ocr_any_store(r):
+                c["later"] += 1    # its PDF is in a store this run may not read
     for item, c in sorted(by.items()):
         print(f"item {item}: needing OCR {c['ocr'] + c['bad_pdf'] + c['to_do']}, OCR'd {c['ocr']} ({c['pages']} pages), "
               f"still failing {c['still_unreadable'] + c['bad_pdf'] + c['to_do']} (unreadable after OCR {c['still_unreadable']}, "
               f"bad PDF {c['bad_pdf']}, not done {c['to_do']}), size {c['bytes_before'] / 1e6:.2f} -> {c['bytes_now'] / 1e6:.2f} MB"
-              + (f", {c['files_unread']} files not readable now" if c["files_unread"] else ""))
+              + (f"; left for later: {c['later']} documents whose PDF is in Backblaze" if c["later"] else "")
+              + (f", {c['files_unread']} text files in Backblaze not read" if c["files_unread"] else ""))
         for path, r in random.sample(samples.get(item, []), min(3, len(samples.get(item, [])))):
             words = " ".join(r["text"].split())
             mid = len(words) // 3
