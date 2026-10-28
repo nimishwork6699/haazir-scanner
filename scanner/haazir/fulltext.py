@@ -49,6 +49,7 @@ PDFTOTEXT = next((p for p in (r"C:\Program Files\Git\mingw64\bin\pdftotext.exe",
 CHUNK = 64_000_000      # text per stored file before gzip (about 15 MB gzip'd)
 UNITS = 250             # GitHub runs at most 256 jobs from one list
 SCAN = 200              # fewer characters than this: a scanned page with no text layer
+EMPTY_TAR = 10_240      # a tar with no files in it is one 10 KB record of zeros
 
 
 def now() -> str:
@@ -164,6 +165,8 @@ def plan(ds: str) -> int:
         p = out_prefix(ds, k)
         if p in done and _stamp(done[p]) >= _stamp(newest[p]):
             continue
+        if s <= EMPTY_TAR:
+            continue    # an empty bundle at the source (e.g. Bombay 'newos_spl' 1993–1999): nothing to read, never "done"
         todo.setdefault(p if ds == "district" else k, []).append((k, s))
     groups = sorted(todo.values(), key=lambda g: -sum(s for _, s in g))
     units: list[list] = [[] for _ in range(min(UNITS, len(groups)))]
