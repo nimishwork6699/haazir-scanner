@@ -392,12 +392,27 @@ def ocr_page(path: str, n: int, work: str, langs: str = LANGS) -> str:
     if not os.path.exists(img):
         raise RuntimeError(f"pdftoppm page {n}: {r.stderr.decode('utf-8', 'replace')[:200]}")
     try:
-        t = _run([TESSERACT, img, "stdout", "-l", langs, "--psm", "3"], 600)
+        t = _run([TESSERACT, img, "stdout", "-l", page_langs(img, langs), "--psm", "3"], 600)
         if t.returncode != 0:
             raise RuntimeError(f"tesseract page {n}: {t.stderr.decode('utf-8', 'replace')[:200]}")
         return t.stdout.decode("utf-8", "replace")
     finally:
         os.remove(img)
+
+
+def page_langs(img: str, langs: str) -> str:
+    """English alone for a page in Latin script: with the Hindi model mixed in, tesseract drops or garbles the digit 1
+    ("March 3, 984" for 1984, "2018" read as "208"), which breaks years, section and case numbers. The page's script
+    comes from tesseract's own script detection (osd); when it cannot tell, langs as given."""
+    try:
+        r = _run([TESSERACT, img, "stdout", "--psm", "0"], 120)
+    except subprocess.TimeoutExpired:
+        return langs
+    m = re.search(rb"Script:\s*(\w+)", r.stdout)
+    conf = re.search(rb"Script confidence:\s*([\d.]+)", r.stdout)
+    if m and m.group(1) == b"Latin" and conf and float(conf.group(1)) >= 1.0:
+        return "eng"
+    return langs
 
 
 def tidy(s: str) -> str:
@@ -660,6 +675,24 @@ def status(spec: str) -> None:
             print(f"    {(r.get('title') or r.get('case_number') or r.get('file') or '')[:70]} | {words[mid:mid + 140]}")
 
 
+def _compare(data: bytes, langs: str) -> dict:
+    """For a test: the first page that needs OCR read with several language settings, and its detected script."""
+    with tempfile.TemporaryDirectory() as work:
+        src = os.path.join(work, "a.pdf")
+        with open(src, "wb") as f:
+            f.write(data)
+        own = pdf_pages(src) or [""]
+        n = next((i + 1 for i, p in enumerate(own) if page_verdict(p) != "ok"), 1)
+        base = os.path.join(work, "c")
+        _run([PDFTOPPM, "-r", str(DPI), "-gray", "-png", "-f", str(n), "-l", str(n), "-singlefile", src, base], 300)
+        img = base + ".png"
+        out = {"page": n, "osd": _run([TESSERACT, img, "stdout", "--psm", "0"], 120).stdout.decode("utf-8", "replace")[-200:],
+               "chosen": page_langs(img, langs)}
+        for lg in dict.fromkeys([langs, "eng+" + langs.replace("+eng", ""), "eng", "hin"]):
+            out[lg] = _run([TESSERACT, img, "stdout", "-l", lg, "--psm", "3"], 600).stdout.decode("utf-8", "replace")[:1500]
+        return out
+
+
 def try_file(store: str, path: str, n: int, workers: int) -> None:
     """OCR the first n documents of one text file that need it, into work/ocr-try/ only (for reading back by hand)."""
     st = Stores()
@@ -674,6 +707,7 @@ def try_file(store: str, path: str, n: int, workers: int) -> None:
                 new = apply(r, got)
                 new["ocr_seconds"] = round(time.time() - t)
                 new["text_before"] = (r.get("text") or "")[:3000]
+                new["compare"] = _compare(st.pdf(pdf_ref(r)), ocr_langs(r))
                 out.append(new)
                 print(f"  {(r.get('title') or r.get('file') or '')[:70]}: {got['ocr_pages']}/{got['pages_total']} pages in {time.time() - t:.0f}s, "
                       f"readable {readable(new['text'])}", flush=True)

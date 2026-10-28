@@ -71,10 +71,11 @@ jobs:
           cache: pip
           cache-dependency-path: scanner/requirements.txt
       - run: pip install -r requirements.txt
-      # Hindi and English for almost everything; the other Indian languages for the Constitution's language editions.
+      # Hindi and English for almost everything; the other Indian languages for the states' acts and the Constitution's
+      # language editions; osd tells a page's script.
       - run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq poppler-utils tesseract-ocr tesseract-ocr-hin > /dev/null
+          sudo apt-get install -y -qq poppler-utils tesseract-ocr tesseract-ocr-hin tesseract-ocr-osd > /dev/null
           sudo apt-get install -y -qq tesseract-ocr-asm tesseract-ocr-ben tesseract-ocr-guj tesseract-ocr-kan tesseract-ocr-mal tesseract-ocr-mar tesseract-ocr-nep tesseract-ocr-ori tesseract-ocr-pan tesseract-ocr-san tesseract-ocr-snd tesseract-ocr-tam tesseract-ocr-tel tesseract-ocr-urd > /dev/null
           tesseract --list-langs | tr '\n' ' '
       - run: |
@@ -148,10 +149,11 @@ jobs:
           cache: pip
           cache-dependency-path: scanner/requirements.txt
       - run: pip install -r requirements.txt
-      # Hindi and English for almost everything; the other Indian languages for the Constitution's language editions.
+      # Hindi and English for almost everything; the other Indian languages for the states' acts and the Constitution's
+      # language editions; osd tells a page's script.
       - run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq poppler-utils tesseract-ocr tesseract-ocr-hin > /dev/null
+          sudo apt-get install -y -qq poppler-utils tesseract-ocr tesseract-ocr-hin tesseract-ocr-osd > /dev/null
           sudo apt-get install -y -qq tesseract-ocr-asm tesseract-ocr-ben tesseract-ocr-guj tesseract-ocr-kan tesseract-ocr-mal tesseract-ocr-mar tesseract-ocr-nep tesseract-ocr-ori tesseract-ocr-pan tesseract-ocr-san tesseract-ocr-snd tesseract-ocr-tam tesseract-ocr-tel tesseract-ocr-urd > /dev/null
           tesseract --list-langs | tr '\n' ' '
       - run: python -m haazir.ocr run "$ITEMS" ${{ matrix.unit }}
