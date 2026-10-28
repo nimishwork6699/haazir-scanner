@@ -1,0 +1,223 @@
+name: Library search index
+
+on:
+  # Started by hand. Runs only in the public repo nimishwork6699/haazir-scanner. Reads the library's judgment summaries
+  # (Backblaze items 12, 13, 33; Google Drive item 14), writes the search index to Google Drive (search/v1/<build>/)
+  # and swaps the manifest on Backblaze last, so readers never see a half-built index (scanner/haazir/search_index.py).
+  # Started again with the same build, it carries on: units and parts already built are not built again.
+  # Started by hand (gh workflow run search-index.yml -f build=... -f step=...), or by publishing a change to
+  # scanner/search-request.txt (its "build:", "step:" and "bench_b2:" lines are then the inputs).
+  workflow_dispatch:
+    inputs:
+      build:
+        description: "build id to carry on (empty: a new build)"
+        default: ""
+      step:
+        description: "all (build, then time it) | bench (only time the live index)"
+        default: all
+      bench_b2:
+        description: "also time the sample index's Backblaze copy (about 300 Backblaze reads)"
+        default: "no"
+  push:
+    branches: [main]
+    paths: [scanner/search-request.txt]
+
+concurrency:
+  group: search-index
+  cancel-in-progress: false
+
+jobs:
+  request:
+    if: github.repository == 'nimishwork6699/haazir-scanner'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      build: ${{ steps.r.outputs.build }}
+      step: ${{ steps.r.outputs.step }}
+      bench_b2: ${{ steps.r.outputs.bench_b2 }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: r
+        env:
+          EVENT: ${{ github.event_name }}
+          IN_BUILD: ${{ inputs.build }}
+          IN_STEP: ${{ inputs.step }}
+          IN_B2: ${{ inputs.bench_b2 }}
+        run: |
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            build="$IN_BUILD"; step="$IN_STEP"; b2="$IN_B2"
+          else
+            build=$(sed -n 's/^build:[[:space:]]*//p' scanner/search-request.txt | head -1)
+            step=$(sed -n 's/^step:[[:space:]]*//p' scanner/search-request.txt | head -1)
+            b2=$(sed -n 's/^bench_b2:[[:space:]]*//p' scanner/search-request.txt | head -1)
+          fi
+          case "$step" in all|bench) ;; *) step=all ;; esac
+          case "$build" in ""|b[0-9-]*) ;; *) echo "bad build id: $build"; exit 1 ;; esac
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "step=$step" >> "$GITHUB_OUTPUT"
+          echo "bench_b2=${b2:-no}" >> "$GITHUB_OUTPUT"
+          echo "build: $build; step: $step; bench_b2: ${b2:-no}"
+
+  plan:
+    needs: request
+    if: needs.request.outputs.step == 'all'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      build: ${{ steps.plan.outputs.build }}
+      units: ${{ steps.plan.outputs.units }}
+      parts: ${{ steps.plan.outputs.parts }}
+    defaults:
+      run:
+        working-directory: scanner
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+      B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
+      B2_APP_KEY: ${{ secrets.B2_APP_KEY }}
+      B2_BUCKET: ${{ secrets.B2_BUCKET }}
+      GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
+      GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
+      GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
+      GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: scanner/requirements.txt
+      - run: pip install -r requirements.txt numpy
+      - run: python -m haazir.search_index_test
+      - id: plan
+        run: python -m haazir.search_index plan --build "${{ needs.request.outputs.build }}" --github-output
+
+  docs:
+    needs: plan
+    if: needs.plan.outputs.units != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 8   # leaves free machines for the founder's own court searches
+      matrix:
+        unit: ${{ fromJson(needs.plan.outputs.units) }}
+    defaults:
+      run:
+        working-directory: scanner
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+      B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
+      B2_APP_KEY: ${{ secrets.B2_APP_KEY }}
+      B2_BUCKET: ${{ secrets.B2_BUCKET }}
+      GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
+      GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
+      GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
+      GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: scanner/requirements.txt
+      - run: pip install -r requirements.txt numpy
+      - run: python -m haazir.search_index docs ${{ matrix.unit }} --build ${{ needs.plan.outputs.build }}
+
+  postings:
+    needs: [plan, docs]
+    if: always() && needs.plan.result == 'success' && (needs.docs.result == 'success' || needs.docs.result == 'skipped') && needs.plan.outputs.parts != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        part: ${{ fromJson(needs.plan.outputs.parts) }}
+    defaults:
+      run:
+        working-directory: scanner
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+      B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
+      B2_APP_KEY: ${{ secrets.B2_APP_KEY }}
+      B2_BUCKET: ${{ secrets.B2_BUCKET }}
+      GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
+      GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
+      GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
+      GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: scanner/requirements.txt
+      - run: pip install -r requirements.txt numpy
+      - run: python -m haazir.search_index postings ${{ matrix.part }} --build ${{ needs.plan.outputs.build }}
+
+  manifest:
+    needs: [plan, postings]
+    if: always() && needs.plan.result == 'success' && (needs.postings.result == 'success' || (needs.postings.result == 'skipped' && needs.plan.outputs.parts == '[]'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: scanner
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+      B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
+      B2_APP_KEY: ${{ secrets.B2_APP_KEY }}
+      B2_BUCKET: ${{ secrets.B2_BUCKET }}
+      GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
+      GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
+      GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
+      GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: scanner/requirements.txt
+      - run: pip install -r requirements.txt numpy
+      - run: python -m haazir.search_index manifest --build ${{ needs.plan.outputs.build }}
+      - run: python -m haazir.search_index status --build ${{ needs.plan.outputs.build }}
+
+  bench:
+    # The 20 test queries timed from a cloud machine (cold = empty block cache, warm = again), against the live index.
+    needs: [request, manifest]
+    if: always() && needs.request.result == 'success' && (needs.manifest.result == 'success' || needs.request.outputs.step == 'bench')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: scanner
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+      B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
+      B2_APP_KEY: ${{ secrets.B2_APP_KEY }}
+      B2_BUCKET: ${{ secrets.B2_BUCKET }}
+      GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
+      GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
+      GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
+      GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: scanner/requirements.txt
+      - run: pip install -r requirements.txt numpy
+      - run: python -m haazir.search_index bench --manifest search/v1/manifest.json.gz --save search/bench/v1-drive.json
+        continue-on-error: true
+      - run: python -m haazir.search_index bench --manifest search/sample/manifest-drive.json.gz --save search/bench/sample-drive.json
+        continue-on-error: true
+      - if: needs.request.outputs.bench_b2 == 'yes'
+        continue-on-error: true
+        run: python -m haazir.search_index bench --manifest search/sample/manifest-b2.json.gz --save search/bench/sample-b2.json

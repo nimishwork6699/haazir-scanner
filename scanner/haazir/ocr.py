@@ -115,6 +115,7 @@ BAD_SHARE = 0.35        # a page is garbled when more than this share of its wor
 KRUTI_SHARE = 0.03      # … or when this share of its words (and at least KRUTI_MIN) are Krutidev spellings of
 KRUTI_MIN = 12          #     common Hindi words
 DOC_SHARE = 0.10        # a document needs OCR when this share of its words sit on garbled or empty pages
+SAMPLE_CHUNKS = 120     # pages judged at most per document (spread through it)
 
 
 def _token_kind(tok: str) -> str:
@@ -202,10 +203,13 @@ def readable(text: str | None) -> bool:
     """The stored text of a document reads as words: no more than DOC_SHARE of it sits on garbled pages, and it is
     not empty."""
     text = text or ""
-    if sum(ch.isalpha() for ch in text) < MIN_LETTERS:
+    if sum(ch.isalpha() for ch in text[:5000]) < MIN_LETTERS and sum(ch.isalpha() for ch in text) < MIN_LETTERS:
         return False
     total = bad = 0
-    for ch in chunks(text):
+    parts = chunks(text)
+    if len(parts) > SAMPLE_CHUNKS:   # a very long document: judged on pages spread evenly through it
+        parts = [parts[i * len(parts) // SAMPLE_CHUNKS] for i in range(SAMPLE_CHUNKS)]
+    for ch in parts:
         n = len(ch.split())
         total += n
         if n and page_verdict(ch) == "garbled":
