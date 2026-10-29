@@ -419,6 +419,13 @@ def check_library(rep: Report) -> None:
         rep.check(a == acts and all(x in s for x in must) and not any(x in s or x in a for x in never), f"headnote: {text[:60]}")
 
 
+def check_lower(rep: Report) -> None:
+    """The lower court decision fetcher (haazir.lower): lower court details read, complexes and names picked, final order stored once."""
+    from .lower_check import run
+    print("Lower court decisions: details read, courts and names picked, the final order stored once…", flush=True)
+    run(rep.check)
+
+
 def check_tribunals(rep: Report) -> None:
     """NCLAT, CAT and APTEL rows (haazir.tribunals): dates, parties, which cases are live, applications, sides."""
     from datetime import date, timedelta
@@ -461,6 +468,7 @@ def main() -> int:
         check_evening_list(rep)
         check_tribunals(rep)
         check_library(rep)
+        check_lower(rep)
         asyncio.run(check_plans(db, portals, rep))
         check_names(db, rep, made)
         check_workers(db, portals, rep, made)

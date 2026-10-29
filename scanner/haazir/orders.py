@@ -75,8 +75,10 @@ async def district_proceedings(ec, db: DB, case_id: str, html: str) -> int:
     return n
 
 
-def store_order(db: DB, case_id: str, pdf: bytes, order_date: str | None, label: str, source_ref: str) -> str | None:
-    """Put an order PDF in the case file. Returns the new document id, or None if it is already there."""
+def store_order(db: DB, case_id: str, pdf: bytes, order_date: str | None, label: str, source_ref: str, kind: str = "order") -> str | None:
+    """Put an order PDF in the case file. Returns the new document id, or None if it is already there.
+    kind "lower_decision": the decision of the court below, kept on the appeal for drafting only. It is stored as read
+    (no reader takes it up), so its dates and directions never become the appeal's own hearings or deadlines."""
     if pdf[:3] == b"\xef\xbb\xbf":
         pdf = pdf[3:]  # some portals prefix a byte-order mark
     if pdf[:4] != b"%PDF":
@@ -91,11 +93,22 @@ def store_order(db: DB, case_id: str, pdf: bytes, order_date: str | None, label:
     if r.status_code >= 300:
         print(f"    order upload failed: {r.status_code} {r.text[:120]}", flush=True)
         return None
-    doc = db.insert("documents", {"case_id": case_id, "kind": "order", "title": label, "source": "ecourts", "source_ref": source_ref,
+    doc = db.insert("documents", {"case_id": case_id, "kind": kind, "title": label, "source": "ecourts", "source_ref": source_ref,
                                   "storage_path": path, "mime": "application/pdf", "size_bytes": len(pdf), "sha256": sha,
-                                  "received_at": now(), "received_by": "Haazir", "read_status": "pending", "order_date": order_date}, returning="id")[0]
-    db.log(case_id, "document_added", {"source": "ecourts", "kind": "order", "order_date": order_date})
+                                  "received_at": now(), "received_by": "Haazir", "read_status": "pending" if kind == "order" else "done",
+                                  "order_date": order_date}, returning="id")[0]
+    db.log(case_id, "document_added", {"source": "ecourts", "kind": kind, "order_date": order_date})
     return doc["id"]
+
+
+async def district_pdf(ec, args: list[str]) -> bytes:
+    """One order PDF from a district case page: the arguments of its displayPdf(...) link. Call it right after
+    ec.detail() of that case, in the same portal session."""
+    r = await ec.client._post_ajax("home/display_pdf", {"normal_v": args[0], "case_val": args[1], "court_code": args[2],
+                                                         "filename": args[3], "appFlag": args[4] if len(args) > 4 else ""})
+    order_path = r.get("order") or ""
+    resp = await ec.client._http.get("https://services.ecourts.gov.in/ecourtindia_v6/" + order_path.lstrip("/"))
+    return resp.content
 
 
 async def district_orders(ec, db: DB, case_id: str, html: str) -> list[str]:
@@ -114,11 +127,7 @@ async def district_orders(ec, db: DB, case_id: str, html: str) -> list[str]:
         if len(args) < 4:
             continue
         try:
-            r = await ec.client._post_ajax("home/display_pdf", {"normal_v": args[0], "case_val": args[1], "court_code": args[2],
-                                                                 "filename": args[3], "appFlag": args[4] if len(args) > 4 else ""})
-            order_path = r.get("order") or ""
-            resp = await ec.client._http.get("https://services.ecourts.gov.in/ecourtindia_v6/" + order_path.lstrip("/"))
-            doc = store_order(db, case_id, resp.content, date, f"Court order {date or ''}".strip(), label[:200])
+            doc = store_order(db, case_id, await district_pdf(ec, args), date, f"Court order {date or ''}".strip(), label[:200])
             if doc:
                 ids.append(doc)
         except Exception as exc:

@@ -1,0 +1,54 @@
+name: Lower court decisions
+
+# For High Court appeals, the lower court's decision (the MACT award or trial court judgment) is fetched from the
+# eCourts district portal and saved in the High Court case's file (kind lower_decision), where drafting reads it (haazir.lower).
+# Started by hand or by the website's timer (/api/cron/tick?job=lower). One case: case_id; otherwise the next `batch`
+# open appeals that have lower court details and no decision on file, nearest hearing first.
+# Runs only in the public repo nimishwork6699/haazir-scanner, where Actions are free (see the job's if).
+on:
+  workflow_dispatch:
+    inputs:
+      case_id:
+        description: "One High Court case id (blank = a batch)"
+        default: ""
+      batch:
+        description: "How many cases in a batch"
+        default: "20"
+
+concurrency:
+  group: lower            # one at a time; its own group so it never replaces a waiting scan
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  lower:
+    if: github.repository == 'nimishwork6699/haazir-scanner'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: scanner
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+      APP_URL: ${{ vars.APP_URL }}
+      CASE_ID: ${{ inputs.case_id }}
+      BATCH: ${{ inputs.batch || '20' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: scanner/requirements.txt
+      - run: pip install -r requirements.txt
+      - name: Fetch lower court decisions
+        # Stops taking new cases after 50 minutes, and at once if eCourts refuses.
+        run: |
+          if [ -n "$CASE_ID" ]; then
+            python -m haazir.lower --case "$CASE_ID"
+          else
+            python -m haazir.lower --batch "$BATCH" --minutes 50
+          fi

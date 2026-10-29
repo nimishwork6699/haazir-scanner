@@ -56,7 +56,10 @@ def lower_court(html: str) -> dict | None:
     court = grab("Court Number and Name", "Case Number and Year")
     number = grab("Case Number and Year", "Case Decision Date")
     decided = grab("Case Decision Date", "State")
-    district = grab("District", "Sub Matters|Document Details|Order|Objection")
+    # The block is followed by other sections of the case page; stop at any of their headings.
+    district = grab("District", "Sub Matters|Document Details|Order|Objection|IA Details|Ia Details|Case History|Cause List|"
+                                "Category Details|Act Details|FIR Details|Petitioner and Advocate|Respondent and Advocate|Connected|"
+                                "Linked Cases|Main Matters")
     m = re.search(r"(\d+)\s*-\s*(\d{4})\s*$", number)
     return {"court": court, "number": number, "decided": decided, "district": district,
             "no": int(m.group(1)) if m else None, "year": int(m.group(2)) if m else None}
