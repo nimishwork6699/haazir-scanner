@@ -1,0 +1,83 @@
+name: Coming week
+
+# Every night at 00:05 IST (the founder's plan, 29 Oct): the court pages of every case heard in the next 7 days are read
+# again (haazir.week --all-week), with the day just ended, open court dates, and then, with the time left, cases whose
+# date passed and were not read since. Five machines share the work: eCourts district cases split in four, and High
+# Court, consumer and NCLT cases on the fifth (start with five; more once a night runs clean). Each stops taking cases
+# after `minutes`, and at once if a court portal blocks it. 40 minutes of reading leaves time for the AI order reads.
+# Started by the website's timer (/api/cron/tick?job=week, pg_cron 'haazir-week', migration 0072) or by hand.
+# Runs only in the public repo nimishwork6699/haazir-scanner, where Actions are free (see the job's if).
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Most cases each machine reads"
+        default: "300"
+      minutes:
+        description: "Each machine stops taking new cases after this many minutes"
+        default: "40"
+      all_week:
+        description: "Read every case heard in the next 7 days (the nightly run does)"
+        type: boolean
+        default: true
+      day:
+        description: "Test one day only: YYYY-MM-DD (blank = tonight's normal run)"
+        default: ""
+
+concurrency:
+  group: week             # one evening run at a time; its own group so it never replaces a waiting scan
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  week:
+    if: github.repository == 'nimishwork6699/haazir-scanner'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - share: district 1 of 4
+            forums: district
+            part: "1/4"
+          - share: district 2 of 4
+            forums: district
+            part: "2/4"
+          - share: district 3 of 4
+            forums: district
+            part: "3/4"
+          - share: district 4 of 4
+            forums: district
+            part: "4/4"
+          - share: high court, consumer, NCLT
+            forums: high_court consumer nclt
+            part: "1/1"
+    name: ${{ matrix.share }}
+    defaults:
+      run:
+        working-directory: scanner
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+      APP_URL: ${{ vars.APP_URL || 'https://haazir-pi.vercel.app' }}
+      LIMIT: ${{ inputs.limit || '300' }}
+      MINUTES: ${{ inputs.minutes || '40' }}
+      ALL_WEEK: ${{ inputs.all_week }}
+      DAY: ${{ inputs.day }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: scanner/requirements.txt
+      - run: pip install -r requirements.txt
+      - name: Read the coming week's court pages
+        run: |
+          ARGS="--limit $LIMIT --minutes $MINUTES --forum ${{ matrix.forums }} --part ${{ matrix.part }}"
+          if [ "$ALL_WEEK" = "true" ]; then ARGS="$ARGS --all-week"; fi
+          if [ -n "$DAY" ]; then ARGS="$ARGS --day $DAY"; fi
+          python -m haazir.week $ARGS

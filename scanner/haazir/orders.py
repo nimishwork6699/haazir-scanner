@@ -191,10 +191,11 @@ def analyse_orders(limit: int = 15) -> dict:
         return {"error": str(exc)[:120]}
 
 
-def refresh_deadlines() -> None:
-    """Ask the dashboard to recompute deadlines after a scan changed dates, stages or orders."""
+def refresh_deadlines(case_ids: list[str] | None = None) -> None:
+    """Ask the dashboard to recompute deadlines after a scan changed dates, stages or orders (only these cases, if given)."""
     if config.APP_URL:
         try:
-            httpx.post(f"{config.APP_URL.rstrip('/')}/api/deadlines/refresh", json={}, headers=_auth(), timeout=90)
+            httpx.post(f"{config.APP_URL.rstrip('/')}/api/deadlines/refresh", json={"caseIds": case_ids} if case_ids else {},
+                       headers=_auth(), timeout=90)
         except httpx.HTTPError:
             pass

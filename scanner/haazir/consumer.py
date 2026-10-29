@@ -225,6 +225,20 @@ def read_number(ej: EJagriti, db: DB, court: dict, series: str, year: int, n: in
     return "match"
 
 
+def refresh_case(ej: EJagriti, db: DB, c: dict, court: dict, comps) -> dict | None:
+    """Read one saved complaint again by its number (status and hearing history) and save it. c needs case_number;
+    court is its commission's courts row. Returns the values saved, or None if e-Jagriti has no record or no watched
+    company is a lead party. Shared by the consumer scan and the nightly coming-week check (haazir.week)."""
+    rec = ej.case(c["case_number"], int(court["complex_code"]))
+    if not rec:
+        return None
+    hist = ej.history(c["case_number"])
+    values = case_values(rec, hist, court, comps)
+    if values:
+        save(db, values, hist, False)
+    return values
+
+
 def scan(db: DB, ej: EJagriti, backfill: int, city: str = "") -> dict:
     comps = companies(db)
     stats = {"read": 0, "matches": 0, "refreshed": 0, "commissions": 0}
@@ -279,13 +293,8 @@ def scan(db: DB, ej: EJagriti, backfill: int, city: str = "") -> dict:
         court = by_court.get(c["court_id"])
         if not court:
             continue
-        rec = ej.case(c["case_number"], int(court["complex_code"]))
-        if rec:
-            hist = ej.history(c["case_number"])
-            values = case_values(rec, hist, court, comps)
-            if values:
-                save(db, values, hist, False)
-                stats["refreshed"] += 1
+        if refresh_case(ej, db, c, court, comps):
+            stats["refreshed"] += 1
     refresh_suggestions(db)
     from .orders import refresh_deadlines
     refresh_deadlines()

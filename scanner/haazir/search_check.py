@@ -426,6 +426,13 @@ def check_lower(rep: Report) -> None:
     run(rep.check)
 
 
+def check_week(rep: Report) -> None:
+    """The coming-week case reader (haazir.week): which cases are read tonight and why, in order, once, within the limits."""
+    from .week_check import run
+    print("Coming week: today's hearings, court dates, the new 7th day, gaps, the first run's whole week; once each, capped…", flush=True)
+    run(rep.check)
+
+
 def check_tribunals(rep: Report) -> None:
     """NCLAT, CAT and APTEL rows (haazir.tribunals): dates, parties, which cases are live, applications, sides."""
     from datetime import date, timedelta
@@ -469,6 +476,7 @@ def main() -> int:
         check_tribunals(rep)
         check_library(rep)
         check_lower(rep)
+        check_week(rep)
         asyncio.run(check_plans(db, portals, rep))
         check_names(db, rep, made)
         check_workers(db, portals, rep, made)

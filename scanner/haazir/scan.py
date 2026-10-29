@@ -279,77 +279,86 @@ async def detail_phase(run: Run, ec: ECourts, budget: int) -> None:
             db.update("cases", f"id=eq.{c['id']}", {"detail_error": f"{type(exc).__name__}: {str(exc)[:200]}"})
             run.note("warn", f"detail failed for {c['cnr']}: {type(exc).__name__}")
             continue
-
-        pets = [{"name": p.name, "advocate": p.advocate} for p in d.petitioners]
-        resps = [{"name": p.name, "advocate": p.advocate} for p in d.respondents]
-        acts = [{"act": a.act, "sections": a.sections} for a in d.acts]
-        acts_text = " ".join(f"{a['act']} {a['sections']}" for a in acts)
-        confirm = terms_by_company.get(c["company_id"], [])
-        side = role([p["name"] for p in pets], [p["name"] for p in resps], confirm)
-        lead_pet = pets[0]["name"] if pets else ""
-        lead_resp = next((p["name"] for p in resps if is_company(p["name"], confirm)), resps[0]["name"] if resps else "")
-        if side == "petitioner":
-            lead_pet = next((p["name"] for p in pets if is_company(p["name"], confirm)), lead_pet)
-            lead_resp = resps[0]["name"] if resps else ""
-        values = {
-            "case_type": d.case_type or None,
-            "filing_number": d.filing_number or None,
-            "filing_date": iso(d.filing_date),
-            "registration_number": d.registration_number or None,
-            "registration_date": iso(d.registration_date),
-            "first_hearing_date": iso(d.first_hearing_date),
-            "next_hearing_date": iso(d.next_hearing_date),
-            "decision_date": iso(d.decision_date),
-            "stage": d.case_stage or None,
-            "court_judge": d.court_number_and_judge or d.court_name or None,
-            "petitioners": pets,
-            "respondents": resps,
-            "petitioner_advocate": (pets[0]["advocate"] or None) if pets else None,
-            "acts": acts,
-            "title": title_of(lead_pet, lead_resp),
-            "category": categorize(d.case_type, acts_text),
-            "detail_fetched_at": now(),
-            "detail_error": None,
-            "updated_at": now(),
-        }
-        rs = c.get("raw_search") or {}
-        named_in_search = is_company(rs.get("petitioner", ""), confirm) or is_company(rs.get("respondent", ""), confirm)
-        is_main_mact = values["category"] == "motor_accident" and not re.search(
-            r"misc|exe|ex\b|execution|appeal", (d.case_type or "").lower())
-        if side != "unknown":
-            values["company_role"] = side
-            values["role_source"] = "case_page"
-        elif named_in_search:
-            # Some courts (Delhi MACT) list only claimants and the driver on the case page, while eCourts
-            # still indexes the insurer as a party. The search hit is the evidence the company is a party.
-            if is_main_mact:
-                values["company_role"] = "respondent"  # the insurer is a respondent to a claim by law
-                values["role_source"] = "inferred_mact"
-                lead_resp = f"{lead_resp} and insurer" if lead_resp else ""
-                values["title"] = title_of(lead_pet, lead_resp)
-        elif pets or resps:
-            # Neither the search row nor the case page names the company (e.g. "United India Traders").
-            values["status"] = "not_ours"
-        if d.decision_date:
-            values["status"] = "disposed"
-            values["disposal"] = disposal_of(ec.last_html)
-        db.update("cases", f"id=eq.{c['id']}", values)
-        hearings = [{"case_id": c["id"], "hearing_date": iso(h.hearing_date), "business_date": iso(h.business_date),
-                     "purpose": h.purpose or None, "judge": h.judge or None} for h in d.history]
-        if hearings:
-            db.insert("hearings", hearings, upsert_on="case_id,hearing_date,business_date", ignore_duplicates=True)
-        db.log(c["id"], "details_fetched", {"next_hearing": values["next_hearing_date"], "role": side})
-        # Cases against us: what happened at each hearing, and any order PDFs the court uploaded.
-        if values.get("company_role") == "respondent" and values.get("status") not in ("not_ours",) and ec.last_html:
-            await orders.district_proceedings(ec, db, c["id"], ec.last_html)
-            new_orders += await orders.district_orders(ec, db, c["id"], ec.last_html)
-        if values.get("status") == "not_ours":
-            db.log(c["id"], "auto_excluded", {"reason": "company not among parties"})
+        _, docs = await save_district(ec, db, c, d, terms_by_company.get(c["company_id"], []))
+        new_orders += docs
         run.stats["details_fetched"] += 1
     if new_orders:
         read = orders.read_with_ai(new_orders)
         run.note("info", f"{len(new_orders)} court orders added to case files, {read} read by AI")
     run.note("info", f"details fetched: {run.stats['details_fetched']}")
+
+
+async def save_district(ec: ECourts, db: DB, c: dict, d, confirm: list[str]) -> tuple[dict, list[str]]:
+    """Write one district case page (read by ec.detail just before, in the same portal session) to the case row:
+    dates, judge, parties and their advocates, side, decided; its hearings; and, for cases against us, the latest
+    proceedings and order PDFs. c needs id, cnr, company_id and raw_search. Returns the values written and the new
+    order documents. Shared by the scan's detail step and the nightly coming-week check (haazir.week)."""
+    new_orders: list[str] = []
+    pets = [{"name": p.name, "advocate": p.advocate} for p in d.petitioners]
+    resps = [{"name": p.name, "advocate": p.advocate} for p in d.respondents]
+    acts = [{"act": a.act, "sections": a.sections} for a in d.acts]
+    acts_text = " ".join(f"{a['act']} {a['sections']}" for a in acts)
+    side = role([p["name"] for p in pets], [p["name"] for p in resps], confirm)
+    lead_pet = pets[0]["name"] if pets else ""
+    lead_resp = next((p["name"] for p in resps if is_company(p["name"], confirm)), resps[0]["name"] if resps else "")
+    if side == "petitioner":
+        lead_pet = next((p["name"] for p in pets if is_company(p["name"], confirm)), lead_pet)
+        lead_resp = resps[0]["name"] if resps else ""
+    values = {
+        "case_type": d.case_type or None,
+        "filing_number": d.filing_number or None,
+        "filing_date": iso(d.filing_date),
+        "registration_number": d.registration_number or None,
+        "registration_date": iso(d.registration_date),
+        "first_hearing_date": iso(d.first_hearing_date),
+        "next_hearing_date": iso(d.next_hearing_date),
+        "decision_date": iso(d.decision_date),
+        "stage": d.case_stage or None,
+        "court_judge": d.court_number_and_judge or d.court_name or None,
+        "petitioners": pets,
+        "respondents": resps,
+        "petitioner_advocate": (pets[0]["advocate"] or None) if pets else None,
+        "acts": acts,
+        "title": title_of(lead_pet, lead_resp),
+        "category": categorize(d.case_type, acts_text),
+        "detail_fetched_at": now(),
+        "detail_error": None,
+        "updated_at": now(),
+    }
+    rs = c.get("raw_search") or {}
+    named_in_search = is_company(rs.get("petitioner", ""), confirm) or is_company(rs.get("respondent", ""), confirm)
+    is_main_mact = values["category"] == "motor_accident" and not re.search(
+        r"misc|exe|ex\b|execution|appeal", (d.case_type or "").lower())
+    if side != "unknown":
+        values["company_role"] = side
+        values["role_source"] = "case_page"
+    elif named_in_search:
+        # Some courts (Delhi MACT) list only claimants and the driver on the case page, while eCourts
+        # still indexes the insurer as a party. The search hit is the evidence the company is a party.
+        if is_main_mact:
+            values["company_role"] = "respondent"  # the insurer is a respondent to a claim by law
+            values["role_source"] = "inferred_mact"
+            lead_resp = f"{lead_resp} and insurer" if lead_resp else ""
+            values["title"] = title_of(lead_pet, lead_resp)
+    elif pets or resps:
+        # Neither the search row nor the case page names the company (e.g. "United India Traders").
+        values["status"] = "not_ours"
+    if d.decision_date:
+        values["status"] = "disposed"
+        values["disposal"] = disposal_of(ec.last_html)
+    db.update("cases", f"id=eq.{c['id']}", values)
+    hearings = [{"case_id": c["id"], "hearing_date": iso(h.hearing_date), "business_date": iso(h.business_date),
+                 "purpose": h.purpose or None, "judge": h.judge or None} for h in d.history]
+    if hearings:
+        db.insert("hearings", hearings, upsert_on="case_id,hearing_date,business_date", ignore_duplicates=True)
+    db.log(c["id"], "details_fetched", {"next_hearing": values["next_hearing_date"], "role": side})
+    # Cases against us: what happened at each hearing, and any order PDFs the court uploaded.
+    if values.get("company_role") == "respondent" and values.get("status") not in ("not_ours",) and ec.last_html:
+        await orders.district_proceedings(ec, db, c["id"], ec.last_html)
+        new_orders += await orders.district_orders(ec, db, c["id"], ec.last_html)
+    if values.get("status") == "not_ours":
+        db.log(c["id"], "auto_excluded", {"reason": "company not among parties"})
+    return values, new_orders
 
 
 def refresh_suggestions(db: DB) -> None:

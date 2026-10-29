@@ -75,6 +75,27 @@ LINK = re.compile(r"\n<a href=\"[^\"]*\">Open in Haazir</a>")
 EMPTY_BUSINESS = re.compile(r"^\s*(fp|f\.p\.?|work done as per order ?sheet|as per order ?sheet|order ?sheet|-+)\s*\.?\s*$", re.I)
 
 
+def night_report(db: DB) -> str:
+    """Last night's court checks, for the morning summary: the coming week's cases read (haazir.week, five machines,
+    each its own run) and the new-case search, or that none ran. Plain lines after the summary's own."""
+    since = (datetime.now(timezone.utc) - timedelta(hours=14)).strftime("%Y-%m-%dT%H:%M:%SZ")  # no "+" in the URL
+    runs = db.select("scan_runs", f"select=trigger,status,details_fetched,new_cases,log&started_at=gte.{since}")
+    week = [r for r in runs if r["trigger"] == "week"]
+    scan = [r for r in runs if r["trigger"] in ("schedule", "manual")]
+    if not week and not scan:
+        return "\n\nLast night's court checks: none ran."
+    out = ["", "", "Last night's court checks:"]
+    if week:
+        bad = [r for r in week if r["status"] != "ok"]
+        blocked = any("blocked" in str(r.get("log") or "").lower() for r in week)
+        out.append(f"• Coming week: {sum(r.get('details_fetched') or 0 for r in week)} court pages read on {len(week)} machines"
+                   + (" · a court site blocked us, the rest wait for tonight" if blocked else f" · {len(bad)} did not finish" if bad else " · all finished"))
+    if scan:
+        out.append(f"• New-case search: {sum(r.get('new_cases') or 0 for r in scan)} new cases"
+                   + ("" if all(r["status"] == "ok" for r in scan) else " · did not finish"))
+    return "\n".join(out)
+
+
 def last_hearings(db: DB, case_id: str) -> str:
     """The case's last 3 hearings in a few lines (database function last_hearings, the same as the case page)."""
     rows = db._check(db.http.post("/rpc/last_hearings", json={"cid": case_id, "n": 3})) or []
@@ -160,7 +181,7 @@ def main() -> int:
         declined = db.select("hearing_reports", f"select=id&attendance=eq.no&hearing_date=gte.{today.isoformat()}")
         lines = (f"Hearings today (against us): {len(hearings)}\nNew cases since yesterday: {len(new)}\n"
                  f"Deadlines overdue: {len(overdue)} · due this week: {len(week)}\n"
-                 f"Advocates unable to attend upcoming hearings: {len(declined)}")
+                 f"Advocates unable to attend upcoming hearings: {len(declined)}" + night_report(db))
         if ops:
             try:
                 telegram.send(int(ops), f"<b>Haazir · {today.strftime('%d %b')}</b>\n{lines}"

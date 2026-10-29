@@ -179,49 +179,11 @@ async def scan(db: DB, budget: int, year: int, company: str = "", city: str = ""
                 except Exception as exc:
                     db.update("cases", f"id=eq.{c['id']}", {"detail_error": f"{type(exc).__name__}: {str(exc)[:200]}"})
                     continue
-                if not d.petitioners and not d.respondents and not d.filing_date and not d.registration_date:
-                    # The portal sometimes answers with an empty page; read it again next run.
-                    db.update("cases", f"id=eq.{c['id']}", {"detail_error": "empty case page", "updated_at": now()})
+                values, docs = await save_case(hc, db, c, d, html, confirm.get(c["company_id"], []))
+                if values is None:
                     continue
-                names = confirm.get(c["company_id"], [])
-                pets = [{"name": p.name, "advocate": p.advocate} for p in d.petitioners]
-                resps = [{"name": p.name, "advocate": p.advocate} for p in d.respondents]
-                side = role([p["name"] for p in pets], [p["name"] for p in resps], names)
-                acts = [{"act": a.act, "sections": a.sections} for a in d.acts]
-                lead_pet = next((p["name"] for p in pets if is_company(p["name"], names)), pets[0]["name"] if pets else "") if side == "petitioner" else (pets[0]["name"] if pets else "")
-                lead_resp = next((p["name"] for p in resps if is_company(p["name"], names)), resps[0]["name"] if resps else "") if side != "petitioner" else (resps[0]["name"] if resps else "")
-                lc = lower_court(html)
-                values = {
-                    "case_type": d.case_type or None, "filing_number": d.filing_number or None, "filing_date": iso(d.filing_date),
-                    "registration_number": d.registration_number or None, "registration_date": iso(d.registration_date),
-                    "first_hearing_date": iso(d.first_hearing_date), "next_hearing_date": iso(d.next_hearing_date),
-                    "decision_date": iso(d.decision_date), "stage": d.case_stage or None,
-                    "court_judge": d.coram or d.court_number_and_judge or None, "petitioners": pets, "respondents": resps,
-                    "petitioner_advocate": (pets[0]["advocate"] or None) if pets else None, "acts": acts,
-                    "title": title_of(lead_pet, lead_resp),
-                    "category": "motor_accident" if lc and "mact" in lc["court"].lower() else categorize(d.case_type, " ".join(a["act"] for a in acts)),
-                    "detail_fetched_at": now(), "detail_error": None, "updated_at": now(),
-                }
-                if side != "unknown":
-                    values["company_role"], values["role_source"] = side, "case_page"
-                elif pets or resps:
-                    values["status"] = "not_ours"
-                if d.decision_date:
-                    values["status"] = "disposed"
-                    values["disposal"] = disposal_of(html)
-                if lc:
-                    values["lower_court_text"] = f"{lc['court']} · {lc['number']}" + (f" · decided {lc['decided']}" if lc["decided"] else "") + (f" · {lc['district'].title()}" if lc["district"] else "")
-                    linked = link_lower(db, lc)
-                    if linked:
-                        values["lower_case_id"] = linked
-                        stats["linked"] += 1
-                db.update("cases", f"id=eq.{c['id']}", values)
-                if side != "unknown" and d.orders:
-                    new_orders += await court_orders.high_court_orders(hc, db, c["id"], d.orders)
-                hearings = [{"case_id": c["id"], "hearing_date": iso(h.hearing_date), "business_date": iso(h.business_date),
-                             "purpose": h.purpose or None, "judge": h.judge or None} for h in d.history if h.hearing_date]
-                if hearings:
-                    db.insert("hearings", hearings, upsert_on="case_id,hearing_date,business_date", ignore_duplicates=True)
+                stats["linked"] += "lower_case_id" in values
+                new_orders += docs
                 stats["details"] += 1
     stats["orders"] = len(new_orders)
     stats["orders_read"] = court_orders.read_with_ai(new_orders)
@@ -229,6 +191,56 @@ async def scan(db: DB, budget: int, year: int, company: str = "", city: str = ""
     court_orders.analyse_orders()
     court_orders.refresh_deadlines()
     return stats
+
+
+async def save_case(hc: HighCourt, db: DB, c: dict, d, html: str, names: list[str]) -> tuple[dict | None, list[str]]:
+    """Write one High Court case page (from hc.detail) to the case row: dates, coram, parties and their advocates,
+    side, decided, the court below; its hearings; and its order PDFs. c needs id and cnr. Returns the values written
+    (None for the empty page the portal sometimes sends: read again next run) and the new order documents.
+    Shared by the High Court scan and the nightly coming-week check (haazir.week)."""
+    if not d.petitioners and not d.respondents and not d.filing_date and not d.registration_date:
+        # The portal sometimes answers with an empty page; read it again next run.
+        db.update("cases", f"id=eq.{c['id']}", {"detail_error": "empty case page", "updated_at": now()})
+        return None, []
+    pets = [{"name": p.name, "advocate": p.advocate} for p in d.petitioners]
+    resps = [{"name": p.name, "advocate": p.advocate} for p in d.respondents]
+    side = role([p["name"] for p in pets], [p["name"] for p in resps], names)
+    acts = [{"act": a.act, "sections": a.sections} for a in d.acts]
+    lead_pet = next((p["name"] for p in pets if is_company(p["name"], names)), pets[0]["name"] if pets else "") if side == "petitioner" else (pets[0]["name"] if pets else "")
+    lead_resp = next((p["name"] for p in resps if is_company(p["name"], names)), resps[0]["name"] if resps else "") if side != "petitioner" else (resps[0]["name"] if resps else "")
+    lc = lower_court(html)
+    values = {
+        "case_type": d.case_type or None, "filing_number": d.filing_number or None, "filing_date": iso(d.filing_date),
+        "registration_number": d.registration_number or None, "registration_date": iso(d.registration_date),
+        "first_hearing_date": iso(d.first_hearing_date), "next_hearing_date": iso(d.next_hearing_date),
+        "decision_date": iso(d.decision_date), "stage": d.case_stage or None,
+        "court_judge": d.coram or d.court_number_and_judge or None, "petitioners": pets, "respondents": resps,
+        "petitioner_advocate": (pets[0]["advocate"] or None) if pets else None, "acts": acts,
+        "title": title_of(lead_pet, lead_resp),
+        "category": "motor_accident" if lc and "mact" in lc["court"].lower() else categorize(d.case_type, " ".join(a["act"] for a in acts)),
+        "detail_fetched_at": now(), "detail_error": None, "updated_at": now(),
+    }
+    if side != "unknown":
+        values["company_role"], values["role_source"] = side, "case_page"
+    elif pets or resps:
+        values["status"] = "not_ours"
+    if d.decision_date:
+        values["status"] = "disposed"
+        values["disposal"] = disposal_of(html)
+    if lc:
+        values["lower_court_text"] = f"{lc['court']} · {lc['number']}" + (f" · decided {lc['decided']}" if lc["decided"] else "") + (f" · {lc['district'].title()}" if lc["district"] else "")
+        linked = link_lower(db, lc)
+        if linked:
+            values["lower_case_id"] = linked
+    db.update("cases", f"id=eq.{c['id']}", values)
+    new_orders: list[str] = []
+    if side != "unknown" and d.orders:
+        new_orders = await court_orders.high_court_orders(hc, db, c["id"], d.orders)
+    hearings = [{"case_id": c["id"], "hearing_date": iso(h.hearing_date), "business_date": iso(h.business_date),
+                 "purpose": h.purpose or None, "judge": h.judge or None} for h in d.history if h.hearing_date]
+    if hearings:
+        db.insert("hearings", hearings, upsert_on="case_id,hearing_date,business_date", ignore_duplicates=True)
+    return values, new_orders
 
 
 async def add(db: DB, court_code: str, benches: list[str], zone_name: str) -> None:

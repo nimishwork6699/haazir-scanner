@@ -162,6 +162,36 @@ def case_row(c: dict, company_id: str, side: str, court_id: str | None, baseline
     }
 
 
+def refresh_case(nc: NCLT, db: DB, c: dict, terms: list[str], cin: str | None, cache: dict) -> dict | None:
+    """Read one saved NCLT case again (NCLT has no case page by number, so: the company's CIN list, else a party search
+    at the case's bench for its year) and save its next date, court and disposal as the scan does. c needs id, cnr
+    (NCLT + filing number), case_number, filing_date and raw_search. cache keeps each list for the rest of the run,
+    so many cases of one company cost one request. Returns the values saved, or None if the case was not found."""
+    filing = c["cnr"][4:]
+    found = None
+    if cin:
+        if ("cin", cin) not in cache:
+            cache[("cin", cin)] = {r["filing_no"]: r for r in nc.by_cin(cin)}
+        found = cache[("cin", cin)].get(filing)
+    bench = BENCH_ID.get(((c.get("raw_search") or {}).get("bench") or "").strip())
+    m = re.search(r"(\d{4})\s*$", c.get("case_number") or "")
+    year = int(m.group(1)) if m else int((c.get("filing_date") or str(date.today().year))[:4])
+    for term in terms if not found and bench else []:
+        key = ("party", term, bench, year)
+        if key not in cache:
+            cache[key] = {r["filing_no"]: r for r in nc.party(term, bench, year, status="0")}
+        found = cache[key].get(filing)
+        if found:
+            break
+    if not found:
+        return None
+    values = {"next_hearing_date": found["next_date"], "decision_date": found["disposed"], "detail_fetched_at": now(),
+              **({"court_judge": f"Court {found['court_no']}"} if found["court_no"] else {}),
+              **({"status": "disposed"} if found["pending"] is False else {})}
+    db.update("cases", f"id=eq.{c['id']}", values)
+    return values
+
+
 def scan(db: DB, company: str = "", years: int = 2, dry: bool = False) -> dict:
     """Watched companies' NCLT cases into Our cases: by CIN (every year) where the company has one, and by name
     (pending cases of this year and last, every bench). Next dates of cases already saved are refreshed."""
