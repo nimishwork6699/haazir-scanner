@@ -257,7 +257,8 @@ def pack(rows: list[dict]) -> bytes:
 
 
 def unpack(data: bytes) -> list[dict]:
-    return [json.loads(line) for line in gzip.decompress(data).decode().splitlines() if line]
+    # Split on "\n" only: str.splitlines() also breaks at U+2028, U+0085 … which JSON leaves unescaped inside text.
+    return [json.loads(line) for line in gzip.decompress(data).decode().split("\n") if line.strip()]
 
 
 def main() -> int:

@@ -7,6 +7,19 @@ file listed in Supabase (library_files). Sources: reports/Drafting sources.md.
     python -m haazir.lawlib cpc                                            # item 9: CPC Orders and Rules
     python -m haazir.lawlib schedules                                      # item 9: schedules of central acts
     python -m haazir.lawlib formats                                        # item 10: appendices (CPC model pleadings) and forms
+    python -m haazir.lawlib gap-acts [--only NAME|ID ...]                  # item 4: acts India Code has no sections for, from their PDFs
+
+India Code in bulk (haazir.ic_load: original PDFs kept in zips, text per document, resumable):
+    python -m haazir.lawlib rules                                          # item 24: central Rules and Regulations
+    python -m haazir.lawlib repealed                                       # item 25: repealed central acts
+    python -m haazir.lawlib notifications [--only Notification Circular …] # item 22: notifications, circulars, orders, ordinances …
+    python -m haazir.lawlib constitution-amendments                        # item 27: Constitution editions and amending acts
+    python -m haazir.lawlib hindi-acts                                     # item 26: Hindi copies of central acts
+    python -m haazir.lawlib state-acts [--only Maharashtra …]              # item 18: state Acts, Rules and sections
+    python -m haazir.lawlib fees-stamps                                    # item 9: which states have a court-fees and a stamp act
+    python -m haazir.lawlib state-gaps                                     # item 18: India Code state acts missing from acts/state
+    python -m haazir.lawlib ic-check PREFIX [--n 3]                        # counts, sizes and 3 random documents vs India Code
+  (add --fresh to list a collection again instead of using the cached listing)
 """
 
 import argparse
@@ -20,7 +33,7 @@ import httpx
 from .acts import ACTS
 from .db import DB
 from .library import _ic_search, _md, _norm_title, _text, clean
-from .storage import B2, pack
+from .storage import B2, pack, unpack
 
 INDIA_CODE = "India Code (indiacode.gov.in), Legislative Department"
 UA = {"User-Agent": "Haazir library (+https://haazir-pi.vercel.app)"}
@@ -240,6 +253,100 @@ def split_act(text: str) -> tuple[list[dict], str | None]:
     for s in out:
         del s["_start"], s["_end"]
     return out, schedules
+
+
+# Acts before about 1860 number their sections in Roman figures at the start of a line: "III. And it is hereby
+# enacted …", "II. What is a public embankment within this Act.—The …". pdftotext often runs them on after the sentence
+# before ("… as follows:— I. Sections …"), and India Code's watermark can leave a few of its letters first ("iaC III.").
+# A number inside a sentence ("Section III. of Regulation XI. 1831") has no full stop or dash before it.
+ROMAN_HEAD = re.compile(r"(?:^|(?<=[.:;—–-] )|(?<=[.:;—–-]))[ \t]*(?:(?:In|d|ia|iaC|o|C|de|e|Co|od|dia|aC|India|IndiaC|Code)[ \t]+)?"
+                        r"([IVXLC]{1,8})\.[ \t]+(?=[A-Z\[(\"“])", re.M)
+
+
+def _names_match(name: str, text: str) -> bool:
+    """The PDF is this act: most words of the act's name are in the PDF's first lines (India Code has attached
+    another act's PDF to some old acts)."""
+    words = [w for w in re.findall(r"[a-z]{3,}", name.lower()) if w not in ("the", "and", "act")]
+    head = re.sub(r"[^a-z]+", " ", text[:1500].lower())
+    return bool(words) and sum(1 for w in words if w in head) >= 0.6 * len(words)
+
+
+def roman_sections(text: str) -> list[dict]:
+    """An old act's sections when they are numbered I, II, III …: the longest rising run of such headings."""
+    lines = [ln for ln in text.replace("\f", "\n").splitlines() if not NOISE.match(ln) and not FOOT.match(ln)]
+    flat = "\n".join(lines)
+    cands = []
+    for m in ROMAN_HEAD.finditer(flat):
+        r = m.group(1)
+        if not re.fullmatch(r"C{0,3}(?:XC|XL|L?X{0,3})(?:IX|IV|V?I{0,3})", r) or not r:
+            continue
+        cands.append((m.start(), m.end(), str(_roman(r)), r))
+    heads = _rising(cands)
+    out = []
+    for i, (start, stop, number, printed) in enumerate(heads):
+        end = heads[i + 1][0] if i + 1 < len(heads) else len(flat)
+        body = clean(flat[stop:end])
+        t = re.match(r"([^—–―]{2,200}?)\s*[.:]?\s*[—–―]+\s*", body)
+        title = clean(t.group(1)).rstrip(".") if t and not re.search(r"\b(?:enacted|whereas)\b", t.group(1), re.I) else None
+        out.append({"n": i + 1, "number": number, "title": title, "body": (body[t.end():] if title else body) or None,
+                    "notes": None, "printed": printed})
+    return out
+
+
+def gap_acts(only: list[str] | None = None) -> None:
+    """Item 4 gap: the central acts India Code has no section records for (sections = 0 in the index), read from
+    the act's own PDF with the splitter, and their act files rewritten in the same format."""
+    from .ic_load import IC, hindi_name, md
+    db, b2 = DB(), B2()
+    index = unpack(b2.get("acts/central/index.jsonl.gz"))
+    gaps = [r for r in index if (r["name"] in only or r["id"] in only)] if only else [r for r in index if r["sections"] == 0]
+    print(f"{len(gaps)} central acts with no sections", flush=True)
+    problems = []
+    ic = IC()
+    _, items = ic.listing(ic.tree()["CENTRAL"]["Acts"])
+    by_id = {md(it, "dc.identifier.act_id"): it for it in items}
+    for r in gaps:
+        it = by_id.get(r["id"])
+        pdfs = [b for b in (it or {}).get("files", {}).get("ORIGINAL", []) if b["name"].lower().endswith(".pdf") and not hindi_name(b["name"])]
+        if not pdfs:
+            print(f"  {r['name']}: no English PDF on India Code", flush=True)
+            continue
+        url = IC_FILE.format(pdfs[0]["uuid"])
+        text = pdf_text(ic.content(pdfs[0]))
+        if not _names_match(re.sub(r"\d{4}", "", r["name"]), text):
+            problems.append(f"{r['name']}: India Code's PDF ({pdfs[0]['name']}) is another act: {clean(text[:80])!r}; left with no sections")
+            act = unpack(b2.get(r["path"]))[0]
+            act.update({"sections": [], "read_at": now(), "sections_from": None,
+                        "note": f"India Code has no section records for this act, and its PDF ({url}) is of another act."})
+            data = pack([act])
+            b2.put(r["path"], data, "application/gzip")
+            record(db, r["path"], "b2", "act", 4, data, title=r["name"], act=r.get("short") or r["name"], rows=0, source=INDIA_CODE)
+            r["sections"] = 0
+            continue
+        sections, _ = split_act(text)
+        old_style = roman_sections(text)
+
+        def whole(secs: list[dict]) -> tuple[float, int]:  # share of section numbers 1..last that were found, then count
+            nums = {_key(s["number"])[0] for s in secs}
+            return (len(nums) / max(nums) if nums else 0.0, len(secs))
+
+        how = "numbered"
+        if whole(old_style) > whole(sections):
+            sections, how = old_style, "roman"
+        act = unpack(b2.get(r["path"]))[0]
+        act.update({"sections": sections, "read_at": now(), "sections_from": "pdf", "source_url": url})
+        data = pack([act])
+        b2.put(r["path"], data, "application/gzip")
+        record(db, r["path"], "b2", "act", 4, data, title=r["name"], act=r.get("short") or r["name"], rows=len(sections), source=INDIA_CODE)
+        r["sections"] = len(sections)
+        nums = [s["number"] for s in sections]
+        print(f"  {r['name']}: {len(sections)} sections ({how}): {', '.join(nums)[:150]}", flush=True)
+    for p in problems:
+        print("  " + p, flush=True)
+    if gaps:
+        data = pack(index)
+        b2.put("acts/central/index.jsonl.gz", data, "application/gzip")
+        record(db, "acts/central/index.jsonl.gz", "b2", "act_index", 4, data, title="Central acts", rows=len(index), source=INDIA_CODE)
 
 
 IC_FILE = "https://indiacode.gov.in/server/api/core/bitstreams/{}/content"
@@ -550,7 +657,43 @@ def main() -> int:
     sub.add_parser("cpc")
     sub.add_parser("schedules")
     sub.add_parser("formats")
+    g = sub.add_parser("gap-acts")
+    g.add_argument("--only", nargs="*")
+    for name in ("rules", "repealed", "notifications", "constitution-amendments", "hindi-acts", "state-acts"):
+        p = sub.add_parser(name)
+        p.add_argument("--fresh", action="store_true")
+        if name in ("notifications", "state-acts"):
+            p.add_argument("--only", nargs="*")
+    sub.add_parser("fees-stamps")
+    sub.add_parser("state-gaps")
+    c = sub.add_parser("ic-check")
+    c.add_argument("prefix")
+    c.add_argument("--n", type=int, default=3)
     args = ap.parse_args()
+    if args.cmd in ("rules", "repealed", "notifications", "constitution-amendments", "hindi-acts", "state-acts", "fees-stamps", "ic-check", "state-gaps"):
+        from . import ic_load
+        if args.cmd == "state-gaps":
+            gaps = ic_load.state_gaps()
+            for state, acts in sorted(gaps.items()):
+                print(f"{state}: {len(acts)}: " + "; ".join(a["title"] for a in acts))
+            print(f"{sum(len(v) for v in gaps.values())} state acts on India Code are not in acts/state (list: library/state/not-in-open-india-law.jsonl.gz)")
+            return 0
+        if args.cmd == "fees-stamps":
+            for state, v in sorted(ic_load.fees_and_stamps().items()):
+                print(f"{state}: court fees: {'; '.join(v['court_fees']) or '-'} (+{v['court_fees_amendments']} amending) | "
+                      f"stamp: {'; '.join(v['stamp']) or '-'} (+{v['stamp_amendments']} amending)")
+            return 0
+        if args.cmd == "ic-check":
+            return ic_load.check(args.prefix, args.n)
+        run = {"rules": ic_load.rules, "repealed": ic_load.repealed, "notifications": ic_load.notifications,
+               "constitution-amendments": ic_load.constitution, "hindi-acts": ic_load.hindi_acts, "state-acts": ic_load.state_acts}[args.cmd]
+        res = run(args.only, fresh=args.fresh) if hasattr(args, "only") else run(fresh=args.fresh)
+        for r in res:
+            print("  " + " · ".join(f"{k} {v}" for k, v in r.items()), flush=True)
+        return 0
+    if args.cmd == "gap-acts":
+        gap_acts(args.only)
+        return 0
     if args.cmd == "acts":
         load_acts(args.only)
     elif args.cmd == "tables":

@@ -6,7 +6,7 @@
 # run:      change this number to start the same request again
 # 28 Oct: build b20261028-1037 has 95 of 99 units; units 28, 30, 31, 32 (High Courts 2007-2013) stopped on Backblaze's
 # daily download cap. Carry it on after the cap resets (00:00 UTC): build: b20261028-1037, step: all, run: 3.
-build:
-step: bench
+build: b20261028-1037
+step: all
 bench_b2: no
-run: 2
+run: 3

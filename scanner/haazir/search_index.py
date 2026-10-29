@@ -10,6 +10,8 @@ read with HTTP range reads (no search server).
     python -m haazir.search_index cnr <CNR>                    exact lookup
     python -m haazir.search_index bench [--manifest NAME]      the 20 test queries, cold and warm, timed
     python -m haazir.search_index sample                       the local proof: plan + every unit + every part + manifest
+    python -m haazir.search_index sample-docs                  the docs level alone (Library's Circulars & Formats tabs)
+    (plan --with-docs adds the docs level to a full build)
     python -m haazir.search_index mirror [MB]                  copy Backblaze sources to Drive, at most MB of downloads
                                                                (default 700), so rebuilds stay under Backblaze's daily cap
 
@@ -51,7 +53,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 ITEM = 34
-LEVELS = ["sc", "hc", "tribunal", "district"]
+LEVELS = ["sc", "hc", "tribunal", "district", "docs"]  # docs: circulars, notifications, bills, … (the Library's other tabs)
 NB = 4096          # term buckets
 NIB = 8192         # exact-lookup buckets
 PARTS = 16
@@ -488,6 +490,73 @@ def doc_district(r: dict, year: int) -> tuple[set, list, dict]:
     return set(t), keys, rec
 
 
+# ---- the docs level
+
+COURT_RULE_COURTS = {
+    "delhi": "Delhi High Court", "kerala": "Kerala High Court", "bombay": "Bombay High Court", "rajasthan": "Rajasthan High Court",
+    "chhattisgarh": "Chhattisgarh High Court", "patna": "Patna High Court", "madras": "Madras High Court", "mp": "Madhya Pradesh High Court",
+    "orissa": "Orissa High Court", "gauhati": "Gauhati High Court", "meghalaya": "Meghalaya High Court", "calcutta": "Calcutta High Court",
+    "gujarat": "Gujarat High Court", "ap": "Andhra Pradesh High Court", "jk": "Jammu and Kashmir High Court", "manipur": "Manipur High Court",
+    "uttarakhand": "Uttarakhand High Court", "sc": "Supreme Court of India", "telangana": "Telangana High Court", "nclat": "NCLAT", "ngt": "National Green Tribunal",
+}
+
+
+def doc_year(r: dict) -> int:
+    for v in (r.get("date"), r.get("year"), r.get("bill_year")):
+        m = re.match(r"\s*((?:18|19|20)\d{2})", str(v or ""))
+        if m:
+            return int(m.group(1))
+    return 0
+
+
+def doc_issuer(r: dict, typ: str) -> tuple[str, str]:
+    """(issuer as shown, issuer id for the filter)."""
+    if typ == "courtrule":
+        c = r.get("court") or ""
+        return COURT_RULE_COURTS.get(c, c.upper()), cid(c)
+    if typ in ("circular", "govtorder") and r.get("court"):
+        return r.get("body") or r["court"].upper(), cid(r["court"])
+    if typ == "bill":
+        return r.get("body") or "Parliament of India", "parliament"
+    if typ == "lcr":
+        return "Law Commission of India", "lawcommission"
+    shown = r.get("department") or r.get("ministry") or r.get("body") or "Government of India"
+    return shown, cid(r.get("ministry") or r.get("body") or "indiacode")
+
+
+def doc_open(r: dict) -> dict | None:
+    """Where the stored original is: a Drive file, or a file inside an India Code zip (path, offset, size)."""
+    if r.get("file"):
+        return {"st": r.get("store") or "drive", "p": r["file"]}
+    files = r.get("files") or []
+    f = next((x for x in files if x.get("name") == r.get("main_file")), files[0] if files else None)
+    if f and f.get("zip") and f.get("size"):
+        return {"st": f.get("store") or "drive", "p": f["zip"], "o": f.get("offset"), "z": f["size"], "nm": f.get("name")}
+    return None
+
+
+def doc_docs(r: dict, typ: str, path: str, year: int) -> tuple[set, list, dict]:
+    # some sources keep a field as an object (an act {id, name}); only text fields are read
+    r = {k: (v.get("name") or v.get("title") if isinstance(v, dict) else v) for k, v in r.items()}
+    r = {k: v for k, v in r.items() if v is None or isinstance(v, (str, int, float, bool, list))}
+    issuer, iid = doc_issuer(r, typ)
+    if typ == "circular":  # a regulator's page lists regulations and notifications too: the kind it gives decides
+        cat = fold(r.get("category"))
+        typ = "rule" if "regulation" in cat or "rules" in cat else "notification" if "notification" in cat else "circular"
+    text = re.sub(r"\s+", " ", str(r.get("text") or "")).strip()
+    t: list[str] = [f"dt:{typ}"] + ([f"is:{iid}"] if iid else [])
+    for fld in ("title", "hindi_title", "number", "category", "collection", "ministry", "house", "act"):
+        t += words(r.get(fld))
+    t += words(issuer)
+    t += text_terms(text[:SNIPPET])
+    for m in _NUMYEAR.finditer(fold(r.get("number") or "")):
+        t.append(f"n:{int(m.group(1))}/{m.group(2)}")
+    rec = _rec({"l": "docs", "y": year or None, "ty": typ, "c": issuer, "ii": iid, "n": r.get("number"), "ti": _clip(r.get("title"), 300),
+                "d": r.get("date"), "x": r.get("category") or r.get("collection"), "s": _clip(text, SNIPPET), "k": doc_open(r),
+                "u": r.get("source_url"), "sc": True if r.get("scan_only") or r.get("text_status") == "scan_only" else None})
+    return set(t), [], rec
+
+
 # ================================================================ stores
 
 DRIVE_API = "https://www.googleapis.com/drive/v3"
@@ -575,8 +644,51 @@ def _record(db, path: str, store: str, kind: str, data_len: int, **kw) -> None:
 
 # ================================================================ plan
 
-def sources(db, sample: bool = False) -> list[dict]:
-    """Every source file in doc order: [{level, year, path, store, rows}] (tribunals: one entry, all forum files)."""
+# ---- the docs level: what the Library's Circulars & notices and Formats tabs search (items 10, 11, 19, 21, 22, 24, 25,
+# 28, 31). One row per document: title, issuer, number, date, the first ~300 characters of its text, and its type.
+# Only Drive-stored files for now; the Backblaze-stored parts (formats, court-rule texts, central rules and
+# regulations, regulators' regulations) are left for after the demo, when downloads from Backblaze are allowed again.
+DOC_SOURCES = [  # (item, kind in library_files, type, path pattern)
+    (19, "circular_text", "circular", r"library/circulars/[^/]+/text/.+\.jsonl\.gz"),
+    (21, "law_commission_text", "lcr", r"library/law-commission/text/.+\.jsonl\.gz"),
+    (22, None, None, r"library/notifications/(?!.*index)[^/]+/[^/]+\.jsonl\.gz"),
+    (25, "repealed_act", "repealedact", r"library/repealed-acts/(?!index)[^/]+\.jsonl\.gz"),
+    (28, "govt_order_text", "govtorder", r"library/govt-orders/[^/]+/text/.+\.jsonl\.gz"),
+    (31, "bill_text", "bill", r"library/bills/text/.+\.jsonl\.gz"),
+]
+DOCS_LATER = ["item 10 formats (Backblaze)", "item 11 court-rule texts (Backblaze; the Drive PDFs are in, by title)",
+              "item 19 regulators' regulations (Backblaze)", "item 24 central rules and regulations texts (Backblaze)"]
+NOTIFICATION_TYPES = {"circular": "circular", "order": "govtorder"}  # item 22 collections; the rest are notifications
+
+
+def doc_sources(db, sample: bool = False) -> dict:
+    """The docs level's sources: Drive text files, and court rules known only by their PDF (title from library_files)."""
+    files = []
+    for item, kind, typ, rx in DOC_SOURCES:
+        q = f"select=path,kind,rows&item=eq.{item}&store=eq.drive&path=like.*.jsonl.gz&order=path"
+        for r in db.select("library_files", q):
+            if (kind and r["kind"] != kind) or not re.fullmatch(rx, r["path"]):
+                continue
+            t = typ or NOTIFICATION_TYPES.get(r["path"].split("/")[2], "notification")
+            files.append({"path": r["path"], "type": t, "rows": r["rows"] or 0})
+    rules = [{"path": r["path"], "title": r.get("title"), "court": r.get("court")}
+             for r in db.select("library_files", "select=path,title,court&item=eq.11&store=eq.drive&kind=eq.court_rules&order=path")]
+    if sample:  # a few of each kind
+        by: dict[str, list] = {}
+        for f in files:
+            parts = f["path"].split("/")
+            by.setdefault("/".join(parts[:3] if len(parts) > 3 else parts[:2]), []).append(f)
+        files = [f for fs in by.values() for f in fs[-2:]]
+        rules = rules[:300]
+    return {"level": "docs", "year": None, "files": sorted(files, key=lambda f: f["path"]), "rules": rules, "store": "drive",
+            "rows": sum(f["rows"] for f in files) + len(rules)}
+
+
+def sources(db, sample: bool = False, docs: bool = False, only_docs: bool = False) -> list[dict]:
+    """Every source file in doc order: [{level, year, path, store, rows}] (tribunals: one entry, all forum files;
+    docs, when asked for: one entry, read by unit_docs in year order)."""
+    if only_docs:
+        return [doc_sources(db, sample)]
     sc = [r for r in db.select("library_files", "select=path,store,rows,year&item=eq.12&order=path")
           if re.fullmatch(r"judgments/sc/\d{4}\.jsonl\.gz", r["path"])]
     hc = [r for r in db.select("library_files", "select=path,store,rows,year&item=eq.13&order=path")
@@ -601,6 +713,8 @@ def sources(db, sample: bool = False) -> list[dict]:
         out.append({"level": "tribunal", "year": None, "paths": sorted(r["path"] for r in tr), "store": "b2", "rows": sum(r["rows"] or 0 for r in tr)})
     for r in sorted(dc, key=lambda r: (-yr(r), r["path"])):
         out.append({"level": "district", "year": yr(r), "path": r["path"], "store": r["store"], "rows": r["rows"] or 0})
+    if docs:
+        out.append(doc_sources(db, sample))
     return out
 
 
@@ -623,7 +737,7 @@ def make_units(srcs: list[dict]) -> list[list[dict]]:
     return units
 
 
-def plan(build: str | None, root: str, store_kind: str, sample: bool) -> dict:
+def plan(build: str | None, root: str, store_kind: str, sample: bool, docs: bool = False, only_docs: bool = False) -> dict:
     from .db import DB
     db = DB()
     build = build or datetime.now(timezone.utc).strftime("b%Y%m%d-%H%M")
@@ -634,7 +748,7 @@ def plan(build: str | None, root: str, store_kind: str, sample: bool) -> dict:
         p = json.loads(old)
         print(f"  {build}: plan already made ({len(p['units'])} units); carrying on", file=sys.stderr)
     else:
-        units = make_units(sources(db, sample))
+        units = make_units(sources(db, sample, docs, only_docs))
         p = {"build": build, "root": root, "store": store_kind, "created": _now(), "units": units}
         for sub in ("", "/docs", "/map", "/meta", "/post"):
             st.folder(base + sub)
@@ -765,6 +879,21 @@ def unit_docs(unit: list[dict]):
                 time.sleep(10 * 2 ** attempt)
 
     for s in unit:
+        if s["level"] == "docs":
+            # every document of the files (and the court rules known by title), newest year first, then file and row
+            # order; each row made into its terms and record at once, so the texts are not all held in memory
+            out = []
+            for pi, f in enumerate(s["files"]):
+                for ri, r in enumerate(_rows(get("drive", f["path"]))):
+                    y = doc_year(r)
+                    out.append((-y, pi, ri, doc_docs(r, f["type"], f["path"], y)))
+            for ri, r in enumerate(s.get("rules") or []):
+                out.append((0, len(s["files"]), ri, doc_docs({"title": r.get("title"), "file": r["path"], "court": r.get("court")},
+                                                            "courtrule", r["path"], 0)))
+            out.sort(key=lambda x: x[:3])
+            for ny, _, _, (terms, keys, rec) in out:
+                yield "docs", -ny, terms, keys, rec
+            continue
         if s["level"] == "tribunal":
             rows = []
             for pi, path in enumerate(s["paths"]):
@@ -1658,12 +1787,13 @@ def main() -> int:
     except (AttributeError, ValueError):
         pass
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=["plan", "docs", "postings", "manifest", "status", "query", "cnr", "bench", "sample", "mirror"])
+    ap.add_argument("cmd", choices=["plan", "docs", "postings", "manifest", "status", "query", "cnr", "bench", "sample", "sample-docs", "mirror"])
     ap.add_argument("arg", nargs="?")
     ap.add_argument("--build")
     ap.add_argument("--root", default="search/v1")
     ap.add_argument("--store", default="drive", choices=["drive", "b2"])
     ap.add_argument("--sample", action="store_true")
+    ap.add_argument("--with-docs", action="store_true", help="plan: also the docs level (circulars, notifications, bills, …)")
     ap.add_argument("--manifest", help="the Backblaze name of the manifest to read (default <root>/manifest.json.gz)")
     ap.add_argument("--level", choices=LEVELS)
     ap.add_argument("--court")
@@ -1675,7 +1805,7 @@ def main() -> int:
     ap.add_argument("--save", help="bench: also write the timings to this Backblaze name")
     a = ap.parse_args()
     if a.cmd == "plan":
-        p = plan(a.build, a.root, a.store, a.sample)
+        p = plan(a.build, a.root, a.store, a.sample, docs=a.with_docs)
         print(json.dumps({"build": p["build"], "units": p["todo"], "parts": p["parts_todo"]}))
         if a.github_output and os.environ.get("GITHUB_OUTPUT"):
             # a part is built again whenever any unit is (re)built in this run
@@ -1694,6 +1824,17 @@ def main() -> int:
         return 0
     if a.cmd == "status":
         status(a.root, a.build)
+        return 0
+    if a.cmd == "sample-docs":
+        # the docs level alone, from Drive-stored files (a few of each kind unless --build carries a full plan)
+        root = "search/sample-docs"
+        p = plan(a.build, root, "drive", True, only_docs=True)
+        for i in p["todo"]:
+            run_docs(p["build"], root, "drive", i, p)
+        for i in range(PARTS):
+            run_postings(p["build"], root, "drive", i)
+        run_manifest(p["build"], root, "drive", pointer=f"{root}/manifest-drive.json.gz")
+        print("  left for after the demo (Backblaze):", "; ".join(DOCS_LATER))
         return 0
     if a.cmd == "sample":
         root = "search/sample"
