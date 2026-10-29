@@ -600,7 +600,10 @@ class Store:
         if length <= 0:
             return b""
         rng = {"Range": f"bytes={start}-{start + length - 1}"}
-        for attempt in range(6):
+        last = "no answer"
+        # 29 Oct: three postings parts failed together after ~1 min of retries (8 machines reading Drive at once hit
+        # its rate limit), so keep trying for ~6 min and say what Drive answered.
+        for attempt in range(10):
             try:
                 if self.drive:
                     # Not Drive._call: its retry drops the Range header, so a retry would fetch the whole file.
@@ -612,10 +615,11 @@ class Store:
                 if r.status_code in (200, 206):
                     data = r.content
                     return data[start:start + length] if r.status_code == 200 else data
-            except Exception:  # noqa: BLE001
-                pass
-            time.sleep(min(30, 2 ** attempt))
-        raise RuntimeError(f"range read of {handle} kept failing")
+                last = f"HTTP {r.status_code}: {r.text[:200]}"
+            except Exception as e:  # noqa: BLE001
+                last = repr(e)[:200]
+            time.sleep(min(60, 2 ** attempt))
+        raise RuntimeError(f"range read of {handle} kept failing ({last})")
 
     def folder(self, name: str) -> None:
         if self.drive:
