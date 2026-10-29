@@ -12,6 +12,8 @@ import sys
 from collections import defaultdict
 from datetime import date, timedelta
 
+import httpx
+
 from . import config, telegram
 from .db import DB
 
@@ -71,7 +73,10 @@ def main() -> int:
         for h in db.select("hearings", f"select=case_id,business_date,next_purpose&case_id=in.({','.join(ids[i:i + 100])})"
                                        "&business_date=not.is.null&next_purpose=not.is.null&order=business_date.desc"):
             purpose.setdefault(h["case_id"], h["next_purpose"])
-    lines = message(cases, purpose, day)
+    # The hearings written out, then the 3 judgments to read for each of them (Phase 6 F2), then the message.
+    shown_ids: list[str] = []
+    message(cases, purpose, day, shown_ids=shown_ids)
+    lines = message(cases, purpose, day, reading(day, shown_ids))
     for part in chunks(lines):
         telegram.send(int(ops), part)
     db.insert("settings", {"key": "causelist_date", "value": day}, upsert_on="key")
@@ -84,7 +89,22 @@ def main() -> int:
 SHOW = 30
 
 
-def message(cases: list[dict], purpose: dict[str, str], day: str) -> list[str]:
+def reading(day: str, ids: list[str]) -> dict[str, list[str]]:
+    """Phase 6 F2: the 3 related judgments to read before each hearing, from the website (GET /api/cron/reading, with the
+    timers' secret). The website only answers; nothing is sent from there. On any failure the list goes without them."""
+    if not config.APP_URL or not ids:
+        return {}
+    from .orders import _auth
+    try:
+        r = httpx.get(f"{config.APP_URL.rstrip('/')}/api/cron/reading", params={"date": day, "ids": ",".join(ids[:30])},
+                      headers=_auth(), timeout=280)
+        return r.json().get("cases", {}) if r.status_code == 200 else {}
+    except (httpx.HTTPError, ValueError):
+        return {}
+
+
+def message(cases: list[dict], purpose: dict[str, str], day: str, read: dict[str, list[str]] | None = None,
+            shown_ids: list[str] | None = None) -> list[str]:
     by_court: dict[str, list[dict]] = defaultdict(list)
     for c in cases:
         by_court[(c.get("court") or {}).get("complex_name") or "Court not known"].append(c)
@@ -107,7 +127,10 @@ def message(cases: list[dict], purpose: dict[str, str], day: str) -> list[str]:
             who = html.escape(c["advocate"]["name"]) if c.get("advocate") else "❗ NO LAWYER"
             side = "vs us" if c["company_role"] == "respondent" else "by us"
             lines.append(f"• {html.escape((c.get('title') or '')[:55])} ({side}, {html.escape((c.get('company') or {}).get('short_name', ''))})\n"
-                         f"  {who} · {html.escape(action(purpose.get(c['id']) or c.get('stage'), c['company_role']))}")
+                         f"  {who} · {html.escape(action(purpose.get(c['id']) or c.get('stage'), c['company_role']))}"
+                         + "".join(f"\n  📖 {html.escape(x)}" for x in (read or {}).get(c["id"], [])[:3]))
+            if shown_ids is not None:
+                shown_ids.append(c["id"])
             shown += 1
     if rest:
         more = sum(len(rows) for _, rows in rest)
