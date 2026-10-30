@@ -167,7 +167,7 @@ async def check_plans(db: DB, portals: Portals, rep: Report) -> None:
                 if "consumer" in forums and not place.get("district_code"):
                     rep.check(any(r["payload"].get("cid") == L.NCDRC for r in rows if r["forum"] == "consumer"), f"{name}: NCDRC included")
                 k = L.workers_for(len(rows))
-                rep.check(k == min(L.MAX_WORKERS, len(rows)), f"{name}: {k} workers would start")
+                rep.check(k == min(L.max_workers(), len(rows)), f"{name}: {k} workers would start")
     # Likeliest courts first: a complex where the name was found before leads its state's district court searches.
     row = {"id": str(uuid.uuid4()), "party": "ICICI LOMBARD", "years": YEARS_ONE, "forums": ["district"], "district_cap": 500,
            **dict(places(portals))["one state"]}
@@ -433,6 +433,13 @@ def check_week(rep: Report) -> None:
     run(rep.check)
 
 
+def check_relay(rep: Report) -> None:
+    """The eCourts relay (haazir.relay): requests and answers through it unchanged, cookies, allow-list, one relay per run, quota."""
+    from .relay_check import run
+    print("eCourts relay: round trip, cookies, binary, allow-list, one relay per run, the 80% hand-over…", flush=True)
+    run(rep.check)
+
+
 def check_tribunals(rep: Report) -> None:
     """NCLAT, CAT and APTEL rows (haazir.tribunals): dates, parties, which cases are live, applications, sides."""
     from datetime import date, timedelta
@@ -477,6 +484,7 @@ def main() -> int:
         check_library(rep)
         check_lower(rep)
         check_week(rep)
+        check_relay(rep)
         asyncio.run(check_plans(db, portals, rep))
         check_names(db, rep, made)
         check_workers(db, portals, rep, made)

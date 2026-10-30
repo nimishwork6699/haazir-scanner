@@ -31,6 +31,10 @@ jobs:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       APP_URL: ${{ vars.APP_URL }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # eCourts answers only Indian addresses: Find one case and the party fill reach it through the Mumbai relay
+      # (haazir/relay.py). Repository variable ECOURTS_RELAY picks supabase, vercel or off.
+      ECOURTS_RELAY: ${{ vars.ECOURTS_RELAY || 'vercel' }}
+      ECOURTS_RELAY_KEY: ${{ secrets.ECOURTS_RELAY_KEY }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

@@ -393,9 +393,11 @@ def main() -> int:
         status = "partial" if stats["blocked"] or stats["failed"] or stats["not_reached"] else "ok"
     finally:
         msg = summary(stats) if stats else "coming week: the run stopped with an error"
+        from . import relay
         db.update("scan_runs", f"id=eq.{run['id']}", {"status": status, "finished_at": now(), "results": len(picks),
                                                       "details_fetched": stats["read"] if stats else 0,
-                                                      "log": [{"at": now(), "level": "info" if status == "ok" else "warn", "msg": msg}]})
+                                                      "log": [{"at": now(), "level": "info" if status == "ok" else "warn", "msg": msg}]
+                                                             + ([{"at": now(), "level": "info", "msg": relay.summary()}] if relay.summary() else [])})
     print(summary(stats), flush=True)
     return 0
 

@@ -12,7 +12,7 @@ import re
 import sys
 from datetime import date, datetime, timedelta, timezone
 
-from . import config, telegram
+from . import config, relay, telegram
 from .classify import categorize
 from .db import DB
 from .ecourts import Blocked, ECourts, LayoutError
@@ -66,6 +66,8 @@ class Run:
         status = "partial" if (self.blocked or self.stats["search_failures"]) else "ok"
         if self.stats["searches"] and self.stats["search_failures"] == self.stats["searches"]:
             status = "failed"
+        if relay.summary():
+            self.note("info", relay.summary())
         self.db.update("scan_runs", f"id=eq.{self.row['id']}",
                        {**self.stats, "status": status, "finished_at": now(), "log": self.log[-200:]})
         print("run finished:", status, self.stats, flush=True)

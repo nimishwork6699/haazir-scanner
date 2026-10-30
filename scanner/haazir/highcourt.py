@@ -23,7 +23,7 @@ from bharat_courts.hcservices import endpoints
 from bharat_courts.hcservices.client import HCServicesClient
 from bharat_courts.hcservices.parser import parse_case_status
 
-from . import config
+from . import config, relay
 from .captcha import MultiReadSolver
 from .classify import categorize
 from .db import DB
@@ -80,6 +80,7 @@ class HighCourt:
     def __init__(self) -> None:
         self.client = HCServicesClient(config=BharatCourtsConfig(request_delay=config.REQUEST_DELAY, max_retries=2),
                                        captcha_solver=MultiReadSolver())
+        relay.attach(self.client._http)  # through the Mumbai relay when ECOURTS_RELAY is set (GitHub); else direct
 
     async def __aenter__(self):
         await self.client.__aenter__()
@@ -288,7 +289,8 @@ def main() -> int:
     db.update("scan_runs", f"id=eq.{run['id']}", {"status": status, "finished_at": now(), "searches": stats.get("searches", 0),
                                                   "search_failures": stats.get("failures", 0), "results": stats.get("found", 0),
                                                   "details_fetched": stats.get("details", 0),
-                                                  "log": [{"at": now(), "level": "info" if status == "ok" else "error", "msg": f"high court: {stats}"}]})
+                                                  "log": [{"at": now(), "level": "info" if status == "ok" else "error", "msg": f"high court: {stats}"}]
+                                                         + ([{"at": now(), "level": "info", "msg": relay.summary()}] if relay.summary() else [])})
     print(f"high court scan: {status} {stats} in {time.time() - t0:.0f}s")
     return 0 if status != "failed" else 1
 

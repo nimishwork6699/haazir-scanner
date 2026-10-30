@@ -35,6 +35,7 @@ import httpx
 from bharat_courts.courts import get_court
 
 from .consumer import EJagriti
+from . import relay
 from .db import DB
 from .ecourts import Blocked, ECourts
 from .highcourt import HighCourt
@@ -42,6 +43,7 @@ from .nclt import BENCHES as NCLT_BENCHES, NCLT
 from .matching import is_company, normalise
 
 MAX_WORKERS = 18       # cloud runners per search (lookup.yml), each with its own address; GitHub Free runs 20 jobs at once, so 2 stay free for Find one case and small searches
+RELAY_MAX_WORKERS = 8  # with the Mumbai relay (ECOURTS_RELAY) all runners share its addresses and its free monthly calls
 LANES = 2              # court sessions per runner at once; eCourts blocked an address at about six
 INDEX_DAYS = 14        # a state's list of court complexes is listed again after this long
 STALE_MINUTES = 30     # a running search with no heartbeat for this long has lost its workers
@@ -433,9 +435,14 @@ def expected(db: DB, row: dict, c: dict) -> int:
     return n
 
 
+def max_workers() -> int:
+    """Cloud runners per search: MAX_WORKERS, or RELAY_MAX_WORKERS when eCourts is reached through the relay."""
+    return min(MAX_WORKERS, RELAY_MAX_WORKERS) if relay.enabled() else MAX_WORKERS
+
+
 def workers_for(open_tasks: int) -> int:
-    """How many cloud workers to start: one per open court search, up to MAX_WORKERS."""
-    return max(1, min(MAX_WORKERS, open_tasks)) if open_tasks else 0
+    """How many cloud workers to start: one per open court search, up to max_workers()."""
+    return max(1, min(max_workers(), open_tasks)) if open_tasks else 0
 
 
 def start(db: DB, row: dict) -> bool:
@@ -781,7 +788,7 @@ def main() -> int:
             output(id="", workers="[]")
             return 0
         open_tasks = asyncio.run(prepare(db, rows[0]))
-        k = min(workers_for(open_tasks), rows[0].get("workers") or MAX_WORKERS)  # a retry runs on fewer machines
+        k = min(workers_for(open_tasks), rows[0].get("workers") or max_workers())  # a retry runs on fewer machines
         output(id=rows[0]["id"], workers=json.dumps(list(range(1, k + 1))))
         if not open_tasks:
             finish_if_done(db, rows[0])

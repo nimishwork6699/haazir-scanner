@@ -32,6 +32,11 @@ env:
   SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
   TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
   APP_URL: ${{ vars.APP_URL }}
+  # eCourts answers only Indian addresses: reach it through the Mumbai relay (haazir/relay.py). Repository variable
+  # ECOURTS_RELAY picks supabase, vercel or off; workers alternate between the two (odd supabase, even vercel). With the
+  # relay on, a search starts at most 8 workers (haazir.lookup RELAY_MAX_WORKERS).
+  ECOURTS_RELAY: ${{ vars.ECOURTS_RELAY || 'supabase' }}
+  ECOURTS_RELAY_KEY: ${{ secrets.ECOURTS_RELAY_KEY }}
 
 jobs:
   find:
@@ -96,7 +101,12 @@ jobs:
           cache: pip
           cache-dependency-path: scanner/requirements.txt
       - run: pip install -r requirements.txt
-      - run: python -m haazir.lookup work --id "${{ needs.plan.outputs.id }}" --worker "${{ matrix.worker }}" --max-minutes 330
+      - run: |
+          # Odd workers through Supabase, even through Vercel, unless the repository variable fixes one (or off).
+          if [ -z "${{ vars.ECOURTS_RELAY }}" ]; then
+            if [ $(( ${{ matrix.worker }} % 2 )) -eq 0 ]; then export ECOURTS_RELAY=vercel; else export ECOURTS_RELAY=supabase; fi
+          fi
+          python -m haazir.lookup work --id "${{ needs.plan.outputs.id }}" --worker "${{ matrix.worker }}" --max-minutes 330
 
   carry-on:
     # Workers that ran out of time leave court searches open: start the next run now. At most 30 runs in a row,

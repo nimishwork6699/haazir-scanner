@@ -5,6 +5,8 @@ name: Coming week
 # date passed and were not read since. Five machines share the work: eCourts district cases split in four, and High
 # Court, consumer and NCLT cases on the fifth (start with five; more once a night runs clean). Each stops taking cases
 # after `minutes`, and at once if a court portal blocks it. 40 minutes of reading leaves time for the AI order reads.
+# eCourts answers only Indian addresses, so each machine reaches it through a relay in Mumbai (haazir/relay.py):
+# three through Supabase, two through Vercel, which spreads the free monthly calls over both.
 # Started by the website's timer (/api/cron/tick?job=week, pg_cron 'haazir-week', migration 0072) or by hand.
 # Runs only in the public repo nimishwork6699/haazir-scanner, where Actions are free (see the job's if).
 on:
@@ -43,18 +45,23 @@ jobs:
           - share: district 1 of 4
             forums: district
             part: "1/4"
+            relay: supabase
           - share: district 2 of 4
             forums: district
             part: "2/4"
+            relay: vercel
           - share: district 3 of 4
             forums: district
             part: "3/4"
+            relay: supabase
           - share: district 4 of 4
             forums: district
             part: "4/4"
+            relay: vercel
           - share: high court, consumer, NCLT
             forums: high_court consumer nclt
             part: "1/1"
+            relay: supabase
     name: ${{ matrix.share }}
     defaults:
       run:
@@ -67,6 +74,9 @@ jobs:
       MINUTES: ${{ inputs.minutes || '40' }}
       ALL_WEEK: ${{ inputs.all_week }}
       DAY: ${{ inputs.day }}
+      # Repository variable ECOURTS_RELAY=off turns the relay off for every machine.
+      ECOURTS_RELAY: ${{ vars.ECOURTS_RELAY == 'off' && 'off' || matrix.relay }}
+      ECOURTS_RELAY_KEY: ${{ secrets.ECOURTS_RELAY_KEY }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

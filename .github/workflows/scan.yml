@@ -51,6 +51,10 @@ jobs:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       BREVO_API_KEY: ${{ secrets.BREVO_API_KEY }}
       APP_URL: ${{ vars.APP_URL || 'https://haazir-pi.vercel.app' }}
+      # eCourts answers only Indian addresses: reach it through the Mumbai relay (haazir/relay.py). Repository variable
+      # ECOURTS_RELAY picks supabase, vercel or off.
+      ECOURTS_RELAY: ${{ vars.ECOURTS_RELAY || 'supabase' }}
+      ECOURTS_RELAY_KEY: ${{ secrets.ECOURTS_RELAY_KEY }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

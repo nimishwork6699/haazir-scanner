@@ -36,6 +36,9 @@ jobs:
       APP_URL: ${{ vars.APP_URL }}
       CASE_ID: ${{ inputs.case_id }}
       BATCH: ${{ inputs.batch || '20' }}
+      # eCourts answers only Indian addresses: through the Mumbai relay (haazir/relay.py); ECOURTS_RELAY=off turns it off.
+      ECOURTS_RELAY: ${{ vars.ECOURTS_RELAY == 'off' && 'off' || 'vercel' }}
+      ECOURTS_RELAY_KEY: ${{ secrets.ECOURTS_RELAY_KEY }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

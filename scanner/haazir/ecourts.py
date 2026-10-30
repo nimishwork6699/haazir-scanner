@@ -16,7 +16,7 @@ from bharat_courts.districtcourts.client import DistrictCourtClient
 from bharat_courts.districtcourts.parser import CaptchaError, MalformedResponseError, _extract_parties
 from bharat_courts.models import CaseInfo
 
-from . import config
+from . import config, relay
 from .captcha import MultiReadSolver
 
 
@@ -77,6 +77,7 @@ class ECourts:
     def __init__(self) -> None:
         cfg = BharatCourtsConfig(request_delay=config.REQUEST_DELAY, max_retries=2)
         self.client = DistrictCourtClient(config=cfg, captcha_solver=MultiReadSolver())
+        relay.attach(self.client._http)  # through the Mumbai relay when ECOURTS_RELAY is set (GitHub); else direct
         self._session_ready = False
         self.last_html = ""  # raw case page of the latest detail() call: proceedings and order links
 
