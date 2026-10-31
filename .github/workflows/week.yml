@@ -7,7 +7,7 @@ name: Coming week
 # after `minutes`, and at once if a court portal blocks it. 110 minutes (31 Oct: the High Court share needed about 70, and
 # the old passed dates come after the week) leaves time for the AI order reads within the 150-minute limit.
 # eCourts answers only Indian addresses, so each machine reaches it through a relay in Mumbai (haazir/relay.py):
-# three through Supabase, two through Vercel, which spreads the free monthly calls over both.
+# all through Supabase: on 31 Oct eCourts' district site stopped answering Vercel's Mumbai address (connect timeouts).
 # Started by the website's timer (/api/cron/tick?job=week, pg_cron 'haazir-week', migration 0072) or by hand.
 # Runs only in the public repo nimishwork6699/haazir-scanner, where Actions are free (see the job's if).
 on:
@@ -50,7 +50,7 @@ jobs:
           - share: district 2 of 4
             forums: district
             part: "2/4"
-            relay: vercel
+            relay: supabase
           - share: district 3 of 4
             forums: district
             part: "3/4"
@@ -58,7 +58,7 @@ jobs:
           - share: district 4 of 4
             forums: district
             part: "4/4"
-            relay: vercel
+            relay: supabase
           - share: high court, consumer, NCLT
             forums: high_court consumer nclt
             part: "1/1"

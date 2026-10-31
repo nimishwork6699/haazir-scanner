@@ -33,7 +33,8 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       # eCourts answers only Indian addresses: Find one case and the party fill reach it through the Mumbai relay
       # (haazir/relay.py). Repository variable ECOURTS_RELAY picks supabase, vercel or off.
-      ECOURTS_RELAY: ${{ vars.ECOURTS_RELAY || 'vercel' }}
+      # 31 Oct: eCourts' district site stopped answering Vercel's Mumbai address (connect timeouts), so every job uses Supabase.
+      ECOURTS_RELAY: ${{ vars.ECOURTS_RELAY || 'supabase' }}
       ECOURTS_RELAY_KEY: ${{ secrets.ECOURTS_RELAY_KEY }}
     steps:
       - uses: actions/checkout@v4

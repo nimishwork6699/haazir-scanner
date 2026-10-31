@@ -102,9 +102,9 @@ jobs:
           cache-dependency-path: scanner/requirements.txt
       - run: pip install -r requirements.txt
       - run: |
-          # Odd workers through Supabase, even through Vercel, unless the repository variable fixes one (or off).
+          # Every worker through Supabase, unless the repository variable fixes one (or off).
           if [ -z "${{ vars.ECOURTS_RELAY }}" ]; then
-            if [ $(( ${{ matrix.worker }} % 2 )) -eq 0 ]; then export ECOURTS_RELAY=vercel; else export ECOURTS_RELAY=supabase; fi
+            export ECOURTS_RELAY=supabase  # 31 Oct: eCourts' district site stopped answering Vercel's Mumbai address (connect timeouts), so every job uses Supabase.
           fi
           python -m haazir.lookup work --id "${{ needs.plan.outputs.id }}" --worker "${{ matrix.worker }}" --max-minutes 330
 
