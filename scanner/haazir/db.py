@@ -1,5 +1,6 @@
 """Minimal PostgREST client for Supabase, authenticated with the secret key."""
 
+import time
 from typing import Any
 
 import httpx
@@ -35,7 +36,13 @@ class DB:
         rows: list[dict] = []
         start = 0
         while True:
-            r = self.http.get(f"/{table}?{query}", headers={"Range": f"{start}-{start + 999}"})
+            # A page that hits the database's statement timeout (57014: busy with other jobs' writes, 31 Oct) is asked
+            # again after a pause, twice, before the run fails.
+            for wait in (5, 20, None):
+                r = self.http.get(f"/{table}?{query}", headers={"Range": f"{start}-{start + 999}"})
+                if wait is None or r.status_code < 500 or "57014" not in r.text:
+                    break
+                time.sleep(wait)
             page = self._check(r) or []
             rows.extend(page)
             if len(page) < 1000:
