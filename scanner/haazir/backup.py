@@ -96,6 +96,9 @@ def run() -> int:
     drive = Drive()
     today = date.today()
     with psycopg.connect(config.env("SUPABASE_DB_URL")) as conn:
+        # One snapshot for every table, so a job writing during the backup (the tribunal loader, 31 Oct) cannot make a
+        # table's file and its count differ.
+        conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
         data, manifest = dump(conn)
     drive.put(f"backups/daily/{today.isoformat()}.tar", data, "application/x-tar")
     if today.day == 1 or not drive.names("backups/monthly"):
