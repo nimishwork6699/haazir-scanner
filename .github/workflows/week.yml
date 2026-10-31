@@ -4,7 +4,8 @@ name: Coming week
 # again (haazir.week --all-week), with the day just ended, open court dates, and then, with the time left, cases whose
 # date passed and were not read since. Five machines share the work: eCourts district cases split in four, and High
 # Court, consumer and NCLT cases on the fifth (start with five; more once a night runs clean). Each stops taking cases
-# after `minutes`, and at once if a court portal blocks it. 40 minutes of reading leaves time for the AI order reads.
+# after `minutes`, and at once if a court portal blocks it. 110 minutes (31 Oct: the High Court share needed about 70, and
+# the old passed dates come after the week) leaves time for the AI order reads within the 150-minute limit.
 # eCourts answers only Indian addresses, so each machine reaches it through a relay in Mumbai (haazir/relay.py):
 # three through Supabase, two through Vercel, which spreads the free monthly calls over both.
 # Started by the website's timer (/api/cron/tick?job=week, pg_cron 'haazir-week', migration 0072) or by hand.
@@ -14,10 +15,10 @@ on:
     inputs:
       limit:
         description: "Most cases each machine reads"
-        default: "300"
+        default: "600"
       minutes:
         description: "Each machine stops taking new cases after this many minutes"
-        default: "40"
+        default: "110"
       all_week:
         description: "Read every case heard in the next 7 days (the nightly run does)"
         type: boolean
@@ -37,7 +38,7 @@ jobs:
   week:
     if: github.repository == 'nimishwork6699/haazir-scanner'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 150
     strategy:
       fail-fast: false
       matrix:
@@ -70,8 +71,8 @@ jobs:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
       APP_URL: ${{ vars.APP_URL || 'https://haazir-pi.vercel.app' }}
-      LIMIT: ${{ inputs.limit || '300' }}
-      MINUTES: ${{ inputs.minutes || '40' }}
+      LIMIT: ${{ inputs.limit || '600' }}
+      MINUTES: ${{ inputs.minutes || '110' }}
       ALL_WEEK: ${{ inputs.all_week }}
       DAY: ${{ inputs.day }}
       # Repository variable ECOURTS_RELAY=off turns the relay off for every machine.
