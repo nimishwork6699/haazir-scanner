@@ -1,12 +1,9 @@
 name: Scan eCourts
 
 on:
-  # Fallback timer. GitHub often starts these hours late; the on-time start comes from Vercel Cron
-  # calling /api/cron/scan, which dispatches this workflow.
+  # Started each night at 00:30 IST by the database timer (pg_cron 'haazir-scan', migration 0072, via
+  # /api/cron/tick?job=scan), or by hand. No GitHub schedule: the founder wants the cloud jobs at night only.
   # Runs only in the public repo nimishwork6699/haazir-scanner, where Actions are free (see the job's if).
-  schedule:
-    - cron: "30 1 * * *"   # 07:00 IST
-    - cron: "30 11 * * *"  # 17:00 IST
   workflow_dispatch:
     inputs:
       trigger:
